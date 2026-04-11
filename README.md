@@ -12,25 +12,16 @@
 
 ---
 
-Applyrx is a macOS live-lyrics application for Apple Music. Unlike tools that
-scrape LRClib, NetEase, or QQ Music, Applyrx reads Apple Music's own signed
-TTML lyric responses directly from the local `NSURLCache`, so what you see is
-byte-for-byte identical to what the Apple Music app itself renders — including
-official translations, romaji, and word-level timing where Apple provides it.
-
-## Why Applyrx
-
-| | Applyrx | LyricsX / LyricFever | sptlrx |
-|---|---|---|---|
-| Lyric source | Apple Music official TTML | Third-party LRC providers | Third-party LRC providers |
-| Timing precision | Millisecond (TTML) | Line-level, best effort | Line-level, best effort |
-| Official translations | Yes, when Apple provides them | No | No |
-| Wrong-song protection | Strict adam-id + metadata matching | — | — |
-| Works offline after first play | Yes | Depends on provider | No |
-| Auth / API keys | None | None | None |
+Applyrx is a macOS live-lyrics application for Apple Music, inspired by the
+desktop-overlay experience popularized by [LyricsX](https://github.com/ddddxxx/LyricsX).
+Instead of querying third-party providers, Applyrx reads Apple Music's own
+signed TTML lyric responses directly from the local `NSURLCache` — so the
+lyrics are byte-for-byte identical to what the Apple Music app itself renders,
+including official translations, romaji, and word-level timing where Apple
+provides it.
 
 Applyrx never guesses. If the currently playing track cannot be unambiguously
-matched against a cached TTML entry by Apple catalog id, title, artist and
+matched against a cached TTML entry by Apple catalog id, title, artist, and
 duration, Applyrx surfaces an explicit error instead of displaying lyrics from
 the wrong song.
 
@@ -58,7 +49,7 @@ Apple Music.app ──plays──▶ signed request to /ttmlLyrics ──▶ NSU
 
 No private entitlements, no Accessibility hacks, no re-implementation of
 Apple's signing. Applyrx simply reuses the signed request that Music.app has
-already cached and asks the same endpoint with the same headers.
+already cached and replays it with the same headers.
 
 ## Features
 
@@ -69,12 +60,14 @@ already cached and asks the same endpoint with the same headers.
 - **Menu bar lyric** showing the current line; can be toggled off.
 - **Full-lyrics window** with current-line highlighting and smooth scrolling.
 - **CLI** (`applyrx_cli.py`) with `state`, `current-line`, `lyrics`, and
-  `watch` subcommands, all JSON-friendly for scripting.
+  `watch` subcommands, all JSON-friendly for scripting and integrations.
 - **Strict match policy**: catalog id + title + artist + duration must agree.
   Traditional/simplified Chinese is normalized, and a unique-duration fallback
   handles storefront title mismatches.
 - **Multi-storefront lookup** (CN/TW/US) so Apple Music CN catalog ids resolve
   correctly.
+- **Offline after first play**: once a song's TTML is cached by Apple Music,
+  Applyrx needs no network access.
 - **Local JSON config** at `~/.applyrx/config.json`, editable from the menu
   bar.
 
@@ -89,7 +82,7 @@ already cached and asks the same endpoint with the same headers.
 ## Quick Start
 
 ```bash
-git clone https://github.com/rakel/applyrx.git
+git clone https://github.com/rakei076/applyrx.git
 cd applyrx
 ./scripts/bootstrap.sh
 ./run_lyricsx_ui.sh
@@ -131,7 +124,7 @@ the GUI.
 ./venv/bin/python applyrx_cli.py --offset 1.2 watch
 ```
 
-The `watch` subcommand is designed for Raycast, Alfred, BTT, tmux status
+The `watch` subcommand works well with Raycast, Alfred, BTT, tmux status
 lines, and Stream Deck integrations.
 
 ## Configuration
@@ -141,8 +134,6 @@ Applyrx stores its config at:
 ```
 ~/.applyrx/config.json
 ```
-
-Frequently used fields:
 
 | Field | Description |
 |---|---|
@@ -194,7 +185,7 @@ Music.app's state.
 
 **Why does my song show "no matching lyrics"?**
 Open the lyrics panel for that song once in Apple Music so the TTML cache is
-populated, then go back to Applyrx.
+populated, then Applyrx will pick it up automatically.
 
 **Can I use this on Spotify / YouTube Music / NetEase?**
 Not by design. Applyrx is intentionally Apple Music-only and Apple-TTML-only.
@@ -211,6 +202,18 @@ normalized before comparison.
 - Homebrew cask
 - Optional word-level (karaoke) rendering where Apple provides it
 - Native Swift menu bar host for lower idle CPU
+
+## Related Projects
+
+These projects share a similar goal and are worth knowing:
+
+- [LyricsX](https://github.com/ddddxxx/LyricsX) — the original macOS desktop
+  lyrics app, written in Swift, supports multiple music players and lyric
+  providers.
+- [sptlrx](https://github.com/raitonoberu/sptlrx) — terminal lyrics viewer
+  for Spotify with a beautiful TUI.
+- [LyricFever](https://www.lyricfever.com/) — macOS lyrics menubar app with
+  Apple Music support.
 
 ## Contributing
 
