@@ -1,0 +1,8 @@
+pyobjc-core==12.1
+pyobjc-framework-Cocoa==12.1
+pyobjc-framework-Quartz==12.1
+pyobjc-framework-ApplicationServices==12.1
+pyobjc-framework-CoreText==12.1
+rich==14.3.3
+requests==2.33.1
+py2app==0.28.10
