@@ -1,5 +1,10 @@
 # Applyrx
 
+<p align="center">
+  <a href="./README.md">English</a> |
+  <a href="./README.zh-CN.md">简体中文</a>
+</p>
+
 Applyrx is a macOS Apple Music live lyrics app inspired by LyricsX. It reads the
 current Apple Music track, matches the song against Apple Music TTML lyric cache,
 and renders synchronized lyrics as a floating desktop overlay, a menu bar lyric,
