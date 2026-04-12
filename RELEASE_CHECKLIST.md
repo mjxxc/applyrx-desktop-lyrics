@@ -6,7 +6,7 @@ Use this before publishing Applyrx to GitHub.
 2. Run static checks:
 
 ```bash
-./venv/bin/python -m py_compile lyricsx_style_app.py lyrics_state.py applyrx_cli.py applyrx_state.py main.py apple_music_ttml.py setup.py
+./venv/bin/python -m py_compile applyrx_ui.py lyrics_state.py applyrx_cli.py applyrx_state.py main.py apple_music_ttml.py setup.py
 ```
 
 3. Verify CLI:
@@ -20,7 +20,7 @@ Use this before publishing Applyrx to GitHub.
 4. Verify GUI:
 
 ```bash
-./run_lyricsx_ui.sh
+./run_applyrx.sh
 ```
 
 5. Verify app build:

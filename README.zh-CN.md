@@ -65,7 +65,7 @@ Apple Music.app ──播放──▶ 向 /ttmlLyrics 发已签名请求 ──�
 git clone https://github.com/rakei076/applyrx.git
 cd applyrx
 ./scripts/bootstrap.sh
-./run_lyricsx_ui.sh
+./run_applyrx.sh
 ```
 
 在 Apple Music 里播放一首歌、打开一次自带歌词面板，Applyrx 就会从 TTML 缓存中读取并开始显示同步歌词。
@@ -127,12 +127,12 @@ Applyrx 的配置文件位于：
 applyrx/
 ├── apple_music_ttml.py      # NSURLCache 读取、请求复放、TTML 解析
 ├── main.py                  # 严格匹配主流程（adam_id + 元数据）
-├── lyricsx_style_app.py     # 桌面悬浮歌词 + 菜单栏 GUI
+├── applyrx_ui.py     # 桌面悬浮歌词 + 菜单栏 GUI
 ├── applyrx_cli.py           # 命令行工具
 ├── applyrx_state.py         # 共享运行时状态
 ├── lyrics_state.py          # 歌词进度 / 当前行跟踪
 ├── scripts/                 # bootstrap.sh、build_app.sh
-├── run_lyricsx_ui.sh        # GUI 启动入口
+├── run_applyrx.sh        # GUI 启动入口
 └── dist/Applyrx.app         # 本地 App bundle
 ```
 

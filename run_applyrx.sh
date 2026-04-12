@@ -2,6 +2,6 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 if [[ -x ./venv/bin/python ]]; then
-  exec ./venv/bin/python ./lyricsx_style_app.py "$@"
+  exec ./venv/bin/python ./applyrx_ui.py "$@"
 fi
-exec python3 ./lyricsx_style_app.py "$@"
+exec python3 ./applyrx_ui.py "$@"

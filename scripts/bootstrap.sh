@@ -7,4 +7,4 @@ python3 -m venv venv
 ./venv/bin/python -m pip install --upgrade pip
 ./venv/bin/python -m pip install -r requirements.txt
 
-echo "Ready. Try: ./run_lyricsx_ui.sh"
+echo "Ready. Try: ./run_applyrx.sh"

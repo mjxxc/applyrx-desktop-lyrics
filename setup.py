@@ -3,7 +3,7 @@ from __future__ import annotations
 from setuptools import setup
 
 
-APP = ["lyricsx_style_app.py"]
+APP = ["applyrx_ui.py"]
 DATA_FILES = [
     "lyrics_state.py",
     "applyrx_state.py",

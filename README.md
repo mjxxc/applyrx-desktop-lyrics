@@ -85,7 +85,7 @@ already cached and replays it with the same headers.
 git clone https://github.com/rakei076/applyrx.git
 cd applyrx
 ./scripts/bootstrap.sh
-./run_lyricsx_ui.sh
+./run_applyrx.sh
 ```
 
 Play a song in Apple Music, open the built-in lyrics panel once, and Applyrx
@@ -152,12 +152,12 @@ Most of these can be changed from the menu bar without editing JSON.
 applyrx/
 ├── apple_music_ttml.py      # NSURLCache reader, request replay, TTML parser
 ├── main.py                  # Strict matching pipeline (adam_id + metadata)
-├── lyricsx_style_app.py     # Desktop overlay + menu bar GUI
+├── applyrx_ui.py     # Desktop overlay + menu bar GUI
 ├── applyrx_cli.py           # Scriptable CLI
 ├── applyrx_state.py         # Shared runtime state
 ├── lyrics_state.py          # Lyric progression / current-line tracking
 ├── scripts/                 # bootstrap.sh, build_app.sh
-├── run_lyricsx_ui.sh        # GUI entry point
+├── run_applyrx.sh        # GUI entry point
 └── dist/Applyrx.app         # Local app bundle
 ```
 

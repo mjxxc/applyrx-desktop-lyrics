@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LyricsX-style macOS UI for applyrx."""
+"""Applyrx — Apple Music 桌面歌词 UI"""
 
 from __future__ import annotations
 
@@ -18,6 +18,19 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 VENV_DIR = SCRIPT_DIR / "venv"
 VENV_PYTHON = VENV_DIR / "bin/python"
 IS_BUNDLED_APP = bool(getattr(sys, "frozen", False))
+
+
+def _find_project_dir(script_dir: Path, is_bundled: bool) -> Path:
+    if not is_bundled:
+        return script_dir
+    # 向上找到 .app 边界，返回其父目录（即 /Applications）
+    p = script_dir
+    for _ in range(10):
+        if p.suffix == ".app":
+            return p.parent
+        p = p.parent
+    return script_dir
+
 
 if not IS_BUNDLED_APP and VENV_PYTHON.exists() and Path(sys.prefix).resolve() != VENV_DIR.resolve():
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
@@ -70,8 +83,8 @@ WINDOW_HEIGHT = 340
 PANEL_WIDTH = 980
 PANEL_HEIGHT = 112
 NS_VARIABLE_STATUS_ITEM_LENGTH = -1
-LOG_PATH = Path("/tmp/applyrx_lyricsx_style.log")
-PROJECT_DIR = SCRIPT_DIR.parents[3] if IS_BUNDLED_APP else SCRIPT_DIR
+LOG_PATH = Path("/tmp/applyrx.log")
+PROJECT_DIR = _find_project_dir(SCRIPT_DIR, IS_BUNDLED_APP)
 PROJECT_HELPER = PROJECT_DIR / "lyrics_state.py"
 HELPER = PROJECT_HELPER if PROJECT_HELPER.exists() else SCRIPT_DIR / "lyrics_state.py"
 PROJECT_VENV_PYTHON = PROJECT_DIR / "venv/bin/python"
@@ -301,7 +314,7 @@ class FloatingLyricsView(objc.lookUpClass("NSView")):
         self.player = {}
         self.lines = []
         self.meta = None
-        self.error = "LyricsX"
+        self.error = ""
         self.active_idx = 0
         self.drag_start = None
         self.drag_config = None
@@ -457,26 +470,17 @@ class AppDelegate(NSObject):
     active_idx = 0
 
     def readHelperState(self):
-        env = os.environ.copy()
-        for key in ("PYTHONHOME", "PYTHONPATH", "PYTHONEXECUTABLE", "__PYVENV_LAUNCHER__"):
-            env.pop(key, None)
-        env.setdefault("LANG", "en_US.UTF-8")
-        env.setdefault("LC_ALL", "en_US.UTF-8")
-
-        result = subprocess.run(
-            [str(HELPER_PYTHON), str(HELPER), "--once"],
-            cwd=str(PROJECT_DIR),
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=15,
-            check=False,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"lyrics_state exited {result.returncode}")
-        return json.loads(result.stdout)
+        """直接在进程内调用 applyrx_state，不走子进程。"""
+        import applyrx_state
+        state = applyrx_state.read_state()
+        return {
+            "ok": state["ok"],
+            "player": state["player"],
+            "song_id": state["match"]["song_id"],
+            "meta": state["match"]["meta"],
+            "lines": state["lines"],
+            "error": state["error"],
+        }
 
     def applicationDidFinishLaunching_(self, notification):
         LOG_PATH.write_text("", encoding="utf-8")
