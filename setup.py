@@ -12,8 +12,23 @@ DATA_FILES = [
 ]
 OPTIONS = {
     "argv_emulation": False,
-    "packages": ["AppKit", "Foundation", "objc"],
-    "includes": ["PyObjCTools.AppHelper", "urllib.request", "urllib.parse", "sqlite3", "json", "subprocess"],
+    "iconfile": "assets/Applyrx.icns",
+    "packages": [
+        "AppKit", "Foundation", "objc",
+        "rich",
+        "requests",
+        "urllib3",
+        "certifi",
+        "charset_normalizer",
+        "idna",
+        "PIL",
+    ],
+    "includes": [
+        "PyObjCTools.AppHelper",
+        "urllib.request", "urllib.parse",
+        "sqlite3", "json", "subprocess",
+        "plistlib", "shutil", "tempfile", "re", "time",
+    ],
     "plist": {
         "CFBundleName": "Applyrx",
         "CFBundleDisplayName": "Applyrx",
@@ -22,6 +37,7 @@ OPTIONS = {
         "CFBundleShortVersionString": "0.1.0",
         "LSUIElement": True,
         "NSAppleEventsUsageDescription": "Applyrx reads the current Apple Music track and playback position to synchronize lyrics.",
+        "NSLoginItemsUsageDescription": "Applyrx can launch at login to keep lyrics always available.",
     },
 }
 

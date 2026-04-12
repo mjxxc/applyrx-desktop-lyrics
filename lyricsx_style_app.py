@@ -444,6 +444,7 @@ class AppDelegate(NSObject):
     desktop_size_slider = None
     background_menu_item = None
     lyrics_window_menu_item = None
+    launch_at_login_menu_item = None
     lyrics_window = None
     last_key = None
     lines = None
@@ -596,6 +597,15 @@ class AppDelegate(NSObject):
         menu.addItem_(full_item)
 
         menu.addItem_(NSMenuItem.separatorItem())
+
+        self.launch_at_login_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "✓ 开机自启动" if self._is_login_item() else "开机自启动",
+            "toggleLaunchAtLogin:", ""
+        )
+        self.launch_at_login_menu_item.setTarget_(self)
+        menu.addItem_(self.launch_at_login_menu_item)
+
+        menu.addItem_(NSMenuItem.separatorItem())
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("退出 applyrx", "terminate:", "q")
         menu.addItem_(quit_item)
         self.status_item.setMenu_(menu)
@@ -616,6 +626,55 @@ class AppDelegate(NSObject):
         if self.lyrics_window_menu_item is not None:
             visible = self.lyrics_window is not None and self.lyrics_window.isVisible()
             self.lyrics_window_menu_item.setTitle_("隐藏完整歌词窗口" if visible else "打开完整歌词窗口")
+
+    # ── 开机自启动 ───────────────────────────────────────────
+
+    def _app_path(self) -> str:
+        """返回当前 .app bundle 路径，或源码路径。"""
+        import os
+        bundle = os.environ.get("APPLYRX_BUNDLE_PATH", "")
+        if bundle:
+            return bundle
+        # py2app 运行时，__file__ 在 Contents/Resources 内
+        resources = os.path.dirname(os.path.abspath(__file__))
+        # 向上找 .app
+        p = resources
+        for _ in range(5):
+            if p.endswith(".app"):
+                return p
+            p = os.path.dirname(p)
+        return resources
+
+    def _is_login_item(self) -> bool:
+        import subprocess
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to get the name of every login item'],
+            capture_output=True, text=True
+        )
+        return "Applyrx" in result.stdout
+
+    def toggleLaunchAtLogin_(self, sender):
+        import subprocess
+        if self._is_login_item():
+            subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to delete login item "Applyrx"'],
+                capture_output=True
+            )
+        else:
+            path = self._app_path()
+            subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "System Events" to make login item at end '
+                 f'with properties {{path:"{path}", hidden:false}}'],
+                capture_output=True
+            )
+        # 刷新菜单标题
+        if self.launch_at_login_menu_item is not None:
+            self.launch_at_login_menu_item.setTitle_(
+                "✓ 开机自启动" if self._is_login_item() else "开机自启动"
+            )
 
     def toggleDesktopLyrics_(self, sender):
         CONFIG["desktop_visible"] = not bool(CONFIG["desktop_visible"])
