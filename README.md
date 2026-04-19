@@ -25,6 +25,12 @@ matched against a cached TTML entry by Apple catalog id, title, artist, and
 duration, Applyrx surfaces an explicit error instead of displaying lyrics from
 the wrong song.
 
+## Demo
+
+[![Applyrx desktop lyric demo](./assets/applyrx-demo-poster.jpg)](./assets/applyrx-demo.mp4)
+
+Click the preview above to watch a short silent demo video.
+
 ## How It Works
 
 ```
@@ -55,8 +61,8 @@ already cached and replays it with the same headers.
 
 - **Apple Music native lyrics** from the local TTML cache — same source as the
   in-app lyrics panel.
-- **Desktop overlay** with draggable position, adjustable size, and optional
-  background.
+- **Desktop overlay** that is click-through by default, with temporary drag
+  unlock, adjustable size, and optional background.
 - **Menu bar lyric** showing the current line; can be toggled off.
 - **Full-lyrics window** with current-line highlighting and smooth scrolling.
 - **CLI** (`applyrx_cli.py`) with `state`, `current-line`, `lyrics`, and
@@ -139,6 +145,7 @@ Applyrx stores its config at:
 |---|---|
 | `offset` | Lyric timing offset in seconds |
 | `desktop_visible` | Show or hide the floating desktop lyric |
+| `desktop_click_through` | Let mouse clicks pass through the desktop lyric |
 | `menubar_lyrics_visible` | Show the current lyric in the menu bar |
 | `font_size_current` | Font size of the main desktop lyric line |
 | `panel_width` / `panel_height` | Size of the desktop lyric panel |
@@ -220,6 +227,9 @@ These projects share a similar goal and are worth knowing:
 Issues and pull requests are welcome. Please keep the strict-matching
 invariant: any change that can cause Applyrx to display lyrics from a
 different song than the one currently playing will be rejected.
+
+For questions, bug reports, or ideas, please open a GitHub Issue/PR or reach
+out on X: [@LuJia32473](https://x.com/LuJia32473).
 
 ## License
 

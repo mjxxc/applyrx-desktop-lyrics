@@ -43,6 +43,7 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSEvent,
     NSFont,
     NSFontAttributeName,
     NSForegroundColorAttributeName,
@@ -79,7 +80,6 @@ from PyObjCTools import AppHelper
 import main as core
 
 
-WINDOW_HEIGHT = 340
 PANEL_WIDTH = 980
 PANEL_HEIGHT = 112
 NS_VARIABLE_STATUS_ITEM_LENGTH = -1
@@ -105,6 +105,7 @@ DEFAULT_CONFIG = {
     "background_alpha": 0.58,
     "hide_on_mouse": False,
     "desktop_visible": True,
+    "desktop_click_through": True,
     "menubar_lyrics_visible": True,
 }
 CONFIG = dict(DEFAULT_CONFIG)
@@ -359,39 +360,38 @@ class FloatingLyricsView(objc.lookUpClass("NSView")):
 
     def panelRect(self):
         bounds = self.bounds()
-        panel_width = min(PANEL_WIDTH, bounds.size.width - 32)
-        panel_width = min(float(CONFIG["panel_width"]), bounds.size.width - 32)
-        panel_height = float(CONFIG["panel_height"])
-        panel_x = bounds.size.width * float(CONFIG["panel_x_factor"]) - panel_width / 2
-        panel_x = max(16, min(panel_x, bounds.size.width - panel_width - 16))
-        panel_y = float(CONFIG["bottom_margin"])
-        panel_y = max(20, min(panel_y, bounds.size.height - panel_height - 18))
-        return NSMakeRect(panel_x, panel_y, panel_width, panel_height)
+        return NSMakeRect(0, 0, bounds.size.width, bounds.size.height)
 
     def mouseDown_(self, event):
-        location = event.locationInWindow()
-        if self.pointIsInsidePanel_(location):
-            self.drag_start = (float(location.x), float(location.y))
-            self.drag_config = (float(CONFIG["panel_x_factor"]), float(CONFIG["bottom_margin"]))
-        else:
-            objc.super(FloatingLyricsView, self).mouseDown_(event)
+        location = NSEvent.mouseLocation()
+        frame = self.window().frame()
+        self.drag_start = (float(location.x), float(location.y))
+        self.drag_config = (float(frame.origin.x), float(frame.origin.y))
 
     def mouseDragged_(self, event):
         if self.drag_start is None or self.drag_config is None:
             objc.super(FloatingLyricsView, self).mouseDragged_(event)
             return
-        location = event.locationInWindow()
-        bounds = self.bounds()
+        location = NSEvent.mouseLocation()
         dx = float(location.x) - self.drag_start[0]
         dy = float(location.y) - self.drag_start[1]
-        CONFIG["panel_x_factor"] = clamp(self.drag_config[0] + dx / max(1.0, bounds.size.width), 0.05, 0.95)
-        CONFIG["bottom_margin"] = max(20.0, min(self.drag_config[1] + dy, bounds.size.height - float(CONFIG["panel_height"]) - 18))
+        frame = self.window().frame()
+        screen = NSScreen.mainScreen().visibleFrame()
+        new_x = self.drag_config[0] + dx
+        new_y = self.drag_config[1] + dy
+        new_x = max(screen.origin.x + 8, min(new_x, screen.origin.x + screen.size.width - frame.size.width - 8))
+        new_y = max(screen.origin.y + 8, min(new_y, screen.origin.y + screen.size.height - frame.size.height - 8))
+        self.window().setFrame_display_(NSMakeRect(new_x, new_y, frame.size.width, frame.size.height), True)
+        CONFIG["panel_x_factor"] = clamp((new_x + frame.size.width / 2 - screen.origin.x) / max(1.0, screen.size.width), 0.0, 1.0)
+        CONFIG["bottom_margin"] = round(new_y - screen.origin.y, 1)
         save_config()
         self.setNeedsDisplay_(True)
 
     def mouseUp_(self, event):
         self.drag_start = None
         self.drag_config = None
+        if APP_DELEGATE is not None:
+            APP_DELEGATE.lockDesktopClickThrough_(None)
 
     def drawRect_(self, dirtyRect):
         try:
@@ -456,8 +456,11 @@ class AppDelegate(NSObject):
     font_size_menu_item = None
     desktop_size_slider = None
     background_menu_item = None
+    drag_menu_item = None
     lyrics_window_menu_item = None
     launch_at_login_menu_item = None
+    drag_unlock_timer = None
+    desktop_click_through = True
     lyrics_window = None
     last_key = None
     lines = None
@@ -492,8 +495,7 @@ class AppDelegate(NSObject):
         self.last_key = None
         self.lyrics_window = FullLyricsWindow.alloc().init()
 
-        screen = NSScreen.mainScreen().visibleFrame()
-        frame = NSMakeRect(screen.origin.x, screen.origin.y, screen.size.width, WINDOW_HEIGHT)
+        frame = self._desktopFrame()
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             frame,
             NSWindowStyleMaskBorderless,
@@ -504,7 +506,7 @@ class AppDelegate(NSObject):
         self.window.setBackgroundColor_(NSColor.clearColor())
         self.window.setHasShadow_(False)
         self.window.setLevel_(NSFloatingWindowLevel)
-        self.window.setIgnoresMouseEvents_(False)
+        self.setDesktopClickThroughEnabled_(bool(CONFIG["desktop_click_through"]))
         self.window.setCollectionBehavior_(
             NSWindowCollectionBehaviorCanJoinAllSpaces
             | NSWindowCollectionBehaviorStationary
@@ -538,6 +540,14 @@ class AppDelegate(NSObject):
         )
         self.desktop_menu_item.setTarget_(self)
         menu.addItem_(self.desktop_menu_item)
+
+        self.drag_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "临时移动桌面歌词（10秒）" if self.desktop_click_through else "完成移动并点穿",
+            "toggleDesktopDragMode:",
+            "m",
+        )
+        self.drag_menu_item.setTarget_(self)
+        menu.addItem_(self.drag_menu_item)
 
         self.menubar_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "隐藏菜单栏歌词" if bool(CONFIG["menubar_lyrics_visible"]) else "显示菜单栏歌词",
@@ -619,6 +629,8 @@ class AppDelegate(NSObject):
             self.desktop_menu_item.setTitle_("隐藏桌面歌词" if bool(CONFIG["desktop_visible"]) else "显示桌面歌词")
         if self.menubar_menu_item is not None:
             self.menubar_menu_item.setTitle_("隐藏菜单栏歌词" if bool(CONFIG["menubar_lyrics_visible"]) else "显示菜单栏歌词")
+        if self.drag_menu_item is not None:
+            self.drag_menu_item.setTitle_("临时移动桌面歌词（10秒）" if self.desktop_click_through else "完成移动并点穿")
         if self.offset_menu_item is not None:
             self.offset_menu_item.setTitle_(f"Offset: {float(CONFIG['offset']):+.1f}s")
         if self.font_size_menu_item is not None:
@@ -630,6 +642,25 @@ class AppDelegate(NSObject):
         if self.lyrics_window_menu_item is not None:
             visible = self.lyrics_window is not None and self.lyrics_window.isVisible()
             self.lyrics_window_menu_item.setTitle_("隐藏完整歌词窗口" if visible else "打开完整歌词窗口")
+
+    def _desktopFrame(self):
+        screen = NSScreen.mainScreen().visibleFrame()
+        width = max(320.0, min(float(CONFIG["panel_width"]), screen.size.width - 32.0))
+        height = max(72.0, min(float(CONFIG["panel_height"]), screen.size.height - 32.0))
+        center_x = screen.origin.x + screen.size.width * float(CONFIG["panel_x_factor"])
+        x = center_x - width / 2.0
+        y = screen.origin.y + float(CONFIG["bottom_margin"])
+        x = max(screen.origin.x + 8.0, min(x, screen.origin.x + screen.size.width - width - 8.0))
+        y = max(screen.origin.y + 8.0, min(y, screen.origin.y + screen.size.height - height - 8.0))
+        return NSMakeRect(x, y, width, height)
+
+    def _applyDesktopFrame(self):
+        frame = self._desktopFrame()
+        if self.window is not None:
+            self.window.setFrame_display_(frame, True)
+        if self.view is not None:
+            self.view.setFrame_(NSMakeRect(0, 0, frame.size.width, frame.size.height))
+            self.view.setNeedsDisplay_(True)
 
     # ── 开机自启动 ───────────────────────────────────────────
 
@@ -689,6 +720,38 @@ class AppDelegate(NSObject):
             self.window.orderOut_(None)
         self.refreshMenu()
 
+    def setDesktopClickThroughEnabled_(self, enabled):
+        self.desktop_click_through = bool(enabled)
+        if self.window is not None:
+            self.window.setIgnoresMouseEvents_(self.desktop_click_through)
+        log(f"desktop click-through: {self.desktop_click_through}")
+        self.refreshMenu()
+
+    def _cancelDragUnlockTimer(self):
+        if self.drag_unlock_timer is not None:
+            self.drag_unlock_timer.invalidate()
+            self.drag_unlock_timer = None
+
+    def toggleDesktopDragMode_(self, sender):
+        if self.desktop_click_through:
+            self._cancelDragUnlockTimer()
+            self.setDesktopClickThroughEnabled_(False)
+            if self.window is not None and bool(CONFIG["desktop_visible"]):
+                self.window.orderFrontRegardless()
+            self.drag_unlock_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                10.0,
+                self,
+                objc.selector(self.lockDesktopClickThrough_, signature=b"v@:@"),
+                None,
+                False,
+            )
+        else:
+            self.lockDesktopClickThrough_(None)
+
+    def lockDesktopClickThrough_(self, timer):
+        self._cancelDragUnlockTimer()
+        self.setDesktopClickThroughEnabled_(True)
+
     def toggleMenubarLyrics_(self, sender):
         CONFIG["menubar_lyrics_visible"] = not bool(CONFIG["menubar_lyrics_visible"])
         save_config()
@@ -714,6 +777,7 @@ class AppDelegate(NSObject):
         CONFIG["panel_width"] = round(max(420.0, min(1800.0, float(DEFAULT_CONFIG["panel_width"]) * scale)), 1)
         CONFIG["panel_height"] = round(max(80.0, min(260.0, float(DEFAULT_CONFIG["panel_height"]) * scale)), 1)
         save_config()
+        self._applyDesktopFrame()
         if self.view is not None:
             self.view.setNeedsDisplay_(True)
         self.refreshMenu()

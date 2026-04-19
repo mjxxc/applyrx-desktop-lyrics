@@ -16,6 +16,12 @@ Applyrx 是一款 macOS 上的 Apple Music 实时歌词应用，体验设计受 
 
 Applyrx 从不猜歌词。如果当前播放的歌曲不能通过 Apple 专辑 id、歌名、艺术家和时长明确匹配到某条缓存 TTML，Applyrx 会显示明确的错误提示，而不是展示另一首歌的歌词。
 
+## 演示
+
+[![Applyrx 桌面歌词演示](./assets/applyrx-demo-poster.jpg)](./assets/applyrx-demo.mp4)
+
+点击上方预览图可以观看一段无声演示视频。
+
 ## 工作原理
 
 ```
@@ -43,7 +49,7 @@ Apple Music.app ──播放──▶ 向 /ttmlLyrics 发已签名请求 ──�
 ## 功能
 
 - **Apple Music 原生歌词**：直接读取本地 TTML 缓存，和应用内歌词面板同源。
-- **桌面悬浮歌词**：位置可拖动，字号可调，背景可隐藏。
+- **桌面悬浮歌词**：默认点击穿透，不影响下面窗口；可临时解锁拖动位置，字号可调，背景可隐藏。
 - **菜单栏歌词**：显示当前句歌词，可一键关闭。
 - **完整歌词窗口**：当前行高亮，平滑滚动。
 - **CLI**（`applyrx_cli.py`）：提供 `state`、`current-line`、`lyrics`、`watch` 四个子命令，输出对脚本友好的 JSON。
@@ -114,6 +120,7 @@ Applyrx 的配置文件位于：
 |---|---|
 | `offset` | 歌词时间偏移秒数 |
 | `desktop_visible` | 显示/隐藏桌面悬浮歌词 |
+| `desktop_click_through` | 桌面悬浮歌词是否点击穿透 |
 | `menubar_lyrics_visible` | 菜单栏是否显示当前歌词 |
 | `font_size_current` | 桌面主歌词行字号 |
 | `panel_width` / `panel_height` | 桌面歌词面板宽高 |
@@ -179,6 +186,8 @@ Applyrx 通过 `itunes.apple.com/lookup` 依次在 CN、TW、US 三个区解析 
 ## 贡献
 
 欢迎提 Issue 和 PR。请务必保持"严格匹配"这一核心约束：任何会导致 Applyrx 显示非当前播放歌曲歌词的改动都不会被合并。
+
+如果遇到问题、想反馈体验或讨论实现，欢迎在 GitHub 提 Issue/PR，也可以通过 X 联系：[@LuJia32473](https://x.com/LuJia32473)。
 
 ## 许可证
 
