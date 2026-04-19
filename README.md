@@ -27,9 +27,9 @@ the wrong song.
 
 ## Demo
 
-[![Applyrx desktop lyric demo](./assets/applyrx-demo-poster.jpg)](./assets/applyrx-demo.mp4)
+![Applyrx desktop lyric demo](./assets/applyrx-demo.gif)
 
-Click the preview above to watch a short silent demo video.
+[Download the silent MP4 demo](./assets/applyrx-demo.mp4).
 
 ## How It Works
 

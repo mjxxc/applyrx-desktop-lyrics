@@ -18,9 +18,9 @@ Applyrx 从不猜歌词。如果当前播放的歌曲不能通过 Apple 专辑 i
 
 ## 演示
 
-[![Applyrx 桌面歌词演示](./assets/applyrx-demo-poster.jpg)](./assets/applyrx-demo.mp4)
+![Applyrx 桌面歌词演示](./assets/applyrx-demo.gif)
 
-点击上方预览图可以观看一段无声演示视频。
+[下载无声 MP4 演示视频](./assets/applyrx-demo.mp4)。
 
 ## 工作原理
 
