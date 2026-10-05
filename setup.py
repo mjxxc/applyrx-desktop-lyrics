@@ -1,7 +1,18 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
 from setuptools import setup
 
+
+if sys.version_info < (3, 10):
+    raise RuntimeError("Applyrx build requires Python 3.10 or newer")
+
+ROOT = Path(__file__).resolve().parent
+NATIVE_PANEL = ROOT / "build" / "ApplyrxLyricsPanel"
+if not NATIVE_PANEL.is_file():
+    raise RuntimeError("Build native/ApplyrxLyricsPanel.swift before packaging the app.")
 
 APP = ["applyrx_ui.py"]
 DATA_FILES = [
@@ -9,6 +20,7 @@ DATA_FILES = [
     "applyrx_state.py",
     "main.py",
     "apple_music_ttml.py",
+    ("native", [str(NATIVE_PANEL)]),
 ]
 OPTIONS = {
     "argv_emulation": False,

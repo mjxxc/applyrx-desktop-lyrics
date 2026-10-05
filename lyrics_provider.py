@@ -397,12 +397,18 @@ class TTMLParser:
             element: ET.Element,
             parent_start: float,
             parent_end: Optional[float],
+            parent_has_absolute_children: bool,
             start_is_defined: bool,
             end_is_defined: bool,
             inherited_language: Optional[str],
         ) -> None:
             language = element.attrib.get(XML_LANG, inherited_language)
-            start, end = self._element_timing(element, parent_start, parent_end)
+            start, end = self._element_timing(
+                element,
+                parent_start,
+                parent_end,
+                parent_has_absolute_children,
+            )
             has_start = start_is_defined or "begin" in element.attrib
             has_end = (
                 end_is_defined
@@ -425,10 +431,28 @@ class TTMLParser:
                 return
 
             child_start = start if start is not None else parent_start
+            children_are_absolute = self._children_use_absolute_timing(
+                element,
+                child_start,
+                end,
+            )
             for child in element:
-                visit(child, child_start, end, has_start, has_end, language)
+                visit(
+                    child,
+                    child_start,
+                    end,
+                    children_are_absolute,
+                    has_start,
+                    has_end,
+                    language,
+                )
 
-        visit(root, 0.0, None, False, False, language_hint)
+        bodies = [
+            element for element in root.iter()
+            if self._local_name(element.tag) == "body"
+        ]
+        for body in bodies:
+            visit(body, 0.0, None, False, False, False, language_hint)
 
         lines.sort(key=lambda line: (line.startTime, line.endTime))
         if not lines:
@@ -450,22 +474,70 @@ class TTMLParser:
     ) -> List[LyricWord]:
         words = []
 
-        def visit(element: ET.Element, parent_start: float, parent_end: Optional[float]) -> None:
-            start, end = self._element_timing(element, parent_start, parent_end)
+        def visit(
+            element: ET.Element,
+            parent_start: float,
+            parent_end: Optional[float],
+            parent_has_absolute_children: bool,
+        ) -> None:
+            start, end = self._element_timing(
+                element,
+                parent_start,
+                parent_end,
+                parent_has_absolute_children,
+            )
             timed = any(name in element.attrib for name in ("begin", "end", "dur"))
             children = list(element)
-            if (self._local_name(element.tag) == "span" and timed and not children
-                    and start is not None and end is not None and end > start):
+            if self._local_name(element.tag) == "span":
                 text = "".join(element.itertext()).strip()
-                if text and start >= line_start - 0.001 and end <= line_end + 0.001:
-                    words.append(LyricWord(startTime=start, endTime=end, text=text))
-                return
+                timed_descendant = any(
+                    self._local_name(descendant.tag) == "span"
+                    and any(name in descendant.attrib for name in ("begin", "end", "dur"))
+                    for child in children
+                    for descendant in child.iter()
+                )
+                has_independent_timing = (
+                    timed
+                    and start is not None
+                    and end is not None
+                    and end > start
+                    and start >= line_start - 0.001
+                    and end <= line_end + 0.001
+                )
+                if text and not timed_descendant:
+                    word_start, word_end = (
+                        (start, end)
+                        if has_independent_timing
+                        else (parent_start, parent_end)
+                    )
+                    if (word_start is not None and word_end is not None
+                            and line_start - 0.001 <= word_start
+                            and word_end <= line_end + 0.001
+                            and word_end > word_start):
+                        words.append(LyricWord(
+                            startTime=word_start,
+                            endTime=word_end,
+                            text=text,
+                        ))
+                    return
+                if not children:
+                    return
             child_start = start if start is not None else parent_start
+            children_are_absolute = self._children_use_absolute_timing(
+                element,
+                child_start,
+                end,
+            )
             for child in children:
-                visit(child, child_start, end)
+                visit(child, child_start, end, children_are_absolute)
 
+        paragraph_children_are_absolute = self._children_use_absolute_timing(
+            paragraph,
+            line_start,
+            line_end,
+        )
         for child in paragraph:
-            visit(child, line_start, line_end)
+            visit(child, line_start, line_end, paragraph_children_are_absolute)
         words.sort(key=lambda word: (word.startTime, word.endTime))
         return words
 
@@ -474,22 +546,33 @@ class TTMLParser:
         element: ET.Element,
         parent_start: float,
         parent_end: Optional[float],
+        parent_has_absolute_children: bool = False,
     ) -> Tuple[Optional[float], Optional[float]]:
         begin_value = element.attrib.get("begin")
         end_value = element.attrib.get("end")
         duration_value = element.attrib.get("dur")
-        start = parent_start
-        if begin_value is not None:
-            begin = self._parse_time(begin_value)
-            if begin is None:
-                return None, None
-            start += begin
+        begin = self._parse_time(begin_value) if begin_value is not None else None
+        parsed_end = self._parse_time(end_value) if end_value is not None else None
+        if begin_value is not None and begin is None:
+            return None, None
+        if end_value is not None and parsed_end is None:
+            return None, None
+
+        absolute = (
+            parent_has_absolute_children
+            and self._fits_parent_interval(begin, parsed_end, parent_start, parent_end)
+        )
+        start = (
+            begin if absolute and begin is not None
+            else parent_start + begin if begin is not None
+            else parent_start
+        )
         end = None
-        if end_value is not None:
-            parsed_end = self._parse_time(end_value)
-            if parsed_end is None:
-                return None, None
-            end = parent_start + parsed_end
+        if parsed_end is not None:
+            end = (
+                parsed_end if absolute
+                else parent_start + parsed_end
+            )
         elif duration_value is not None:
             duration = self._parse_time(duration_value)
             if duration is None or duration <= 0:
@@ -499,9 +582,76 @@ class TTMLParser:
             end = parent_end
         return start, end
 
+    @classmethod
+    def _children_use_absolute_timing(
+        cls,
+        parent: ET.Element,
+        parent_start: float,
+        parent_end: Optional[float],
+    ) -> bool:
+        if parent_end is None:
+            return False
+        timed_children = [
+            child for child in parent
+            if any(name in child.attrib for name in ("begin", "end", "dur"))
+        ]
+        if not timed_children:
+            return False
+
+        fits = True
+        aligns_with_boundary = False
+        for child in timed_children:
+            raw_begin = cls._parse_time(child.attrib["begin"]) if "begin" in child.attrib else None
+            raw_end = cls._parse_time(child.attrib["end"]) if "end" in child.attrib else None
+            raw_duration = cls._parse_time(child.attrib["dur"]) if "dur" in child.attrib else None
+            if (("begin" in child.attrib and raw_begin is None)
+                    or ("end" in child.attrib and raw_end is None)
+                    or ("dur" in child.attrib and raw_duration is None)):
+                return False
+            child_start = raw_begin if raw_begin is not None else parent_start
+            child_end = (
+                raw_end if raw_end is not None
+                else child_start + raw_duration if raw_duration is not None
+                else parent_end
+            )
+            if not cls._fits_parent_interval(
+                child_start,
+                child_end,
+                parent_start,
+                parent_end,
+            ):
+                fits = False
+                break
+            aligns_with_boundary = aligns_with_boundary or (
+                raw_begin is not None
+                and math.isclose(raw_begin, parent_start, abs_tol=0.001)
+            ) or (
+                raw_end is not None
+                and math.isclose(raw_end, parent_end, abs_tol=0.001)
+            )
+        return fits and aligns_with_boundary
+
+    @staticmethod
+    def _fits_parent_interval(
+        begin: Optional[float],
+        end: Optional[float],
+        parent_start: float,
+        parent_end: Optional[float],
+    ) -> bool:
+        if parent_end is None:
+            return False
+        child_start = begin if begin is not None else parent_start
+        child_end = end
+        return (
+            parent_start <= child_start <= parent_end
+            and (child_end is None or child_start <= child_end <= parent_end)
+        )
+
     @staticmethod
     def _parse_time(value: str) -> Optional[float]:
         value = value.strip()
+        if not value:
+            return None
         try:
             if value.endswith("ms"):
                 seconds = float(value[:-2]) / 1000
@@ -522,7 +672,7 @@ class TTMLParser:
                 else:
                     return None
             else:
-                return None
+                seconds = float(value)
         except ValueError:
             return None
         return seconds if math.isfinite(seconds) and seconds >= 0 else None
@@ -534,6 +684,15 @@ class TTMLParser:
 class TrackMatcher:
     """Require one catalog identity and exact metadata with bounded duration drift."""
 
+    def __init__(self) -> None:
+        self.last_diagnostics = {
+            "candidateCount": 0,
+            "completeCandidateCount": 0,
+            "matchedCandidateCount": 0,
+            "incompleteCandidateCount": 0,
+            "finalStatus": "notFound",
+        }
+
     def match(
         self,
         track: CurrentTrack,
@@ -541,14 +700,17 @@ class TrackMatcher:
         songs_by_response: Sequence[Sequence[CatalogSong]],
     ) -> Union[CatalogSong, NotFound, Ambiguous, InvalidMatch]:
         if len(responses) != len(songs_by_response):
-            return InvalidMatch("Cached response parsing is incomplete.")
+            return self._finish(
+                InvalidMatch("Cached response parsing is incomplete.")
+            )
         if not self._valid_track(track):
-            return InvalidMatch("Current track metadata is incomplete or invalid.")
-        candidates: Dict[str, CatalogSong] = {}
-        identity_conflicts: Set[str] = set()
-        relevant_conflicts: Set[str] = set()
-        off_id_metadata_matches: Set[str] = set()
-        candidate_metadata: Dict[str, CatalogSong] = {}
+            return self._finish(
+                InvalidMatch("Current track metadata is incomplete or invalid.")
+            )
+
+        grouped: Dict[str, List[CatalogSong]] = {}
+        request_conflict = False
+        off_id_metadata_matches = False
 
         for response, songs in zip(responses, songs_by_response):
             for song in songs:
@@ -556,70 +718,140 @@ class TrackMatcher:
                 metadata_matches = self._metadata_matches(track, song)
                 if track.catalogId and song.catalogId != track.catalogId:
                     if metadata_matches:
-                        off_id_metadata_matches.add(song.catalogId)
+                        off_id_metadata_matches = True
                     if track.catalogId in requested_ids:
-                        identity_conflicts.add(track.catalogId)
-                    continue
-                requested_id_mismatch = bool(
-                    requested_ids
-                    and song.catalogId not in requested_ids
-                    and (metadata_matches or track.catalogId == song.catalogId)
-                )
-                if requested_id_mismatch:
-                    identity_conflicts.add(song.catalogId)
-                    if metadata_matches or track.catalogId == song.catalogId:
-                        relevant_conflicts.add(song.catalogId)
+                        request_conflict = True
                     continue
                 if requested_ids and song.catalogId not in requested_ids:
+                    if metadata_matches or track.catalogId == song.catalogId:
+                        request_conflict = True
                     continue
-                previous_metadata = candidate_metadata.get(song.catalogId)
-                if previous_metadata is not None and self._metadata_conflicts(
-                    previous_metadata, song
-                ):
-                    identity_conflicts.add(song.catalogId)
-                else:
-                    candidate_metadata[song.catalogId] = self._merge_metadata(
-                        previous_metadata, song
-                    )
-
-                if track.catalogId and song.catalogId == track.catalogId:
-                    if not metadata_matches:
-                        identity_conflicts.add(song.catalogId)
-                    else:
-                        candidates[song.catalogId] = self._merge_candidate(
-                            candidates.get(song.catalogId), song
-                        )
-                    continue
-                if not track.catalogId and metadata_matches:
-                    candidates[song.catalogId] = self._merge_candidate(
-                        candidates.get(song.catalogId), song
-                    )
+                grouped.setdefault(song.catalogId, []).append(song)
 
         if track.catalogId:
-            if track.catalogId in identity_conflicts or track.catalogId in relevant_conflicts:
-                return InvalidMatch("Cached metadata conflicts for the requested catalog ID.")
-            if track.catalogId in candidates:
-                return candidates[track.catalogId]
-            if candidates:
-                return InvalidMatch("Cached catalog ID conflicts with the current track.")
-            if off_id_metadata_matches:
-                return InvalidMatch(
-                    "Cached metadata matches a different catalog ID than the requested one."
+            relevant = grouped.get(track.catalogId, [])
+        else:
+            relevant = [song for group in grouped.values() for song in group]
+
+        complete_count = sum(self._metadata_complete(song) for song in relevant)
+        matched_by_id: Dict[str, List[CatalogSong]] = {}
+        conflicting_ids: Set[str] = set()
+        for catalog_id, group in grouped.items():
+            complete = [song for song in group if self._metadata_complete(song)]
+            if any(
+                self._metadata_conflicts(first, second)
+                for index, first in enumerate(complete)
+                for second in complete[index + 1:]
+            ):
+                conflicting_ids.add(catalog_id)
+            strict_matches = [
+                song for song in complete
+                if self._metadata_matches(track, song)
+            ]
+            if strict_matches:
+                matched_by_id[catalog_id] = strict_matches
+
+        matched_count = sum(
+            len(group)
+            for catalog_id, group in matched_by_id.items()
+            if not track.catalogId or catalog_id == track.catalogId
+        )
+        self._set_diagnostics(
+            candidate_count=len(relevant),
+            complete_count=complete_count,
+            matched_count=matched_count,
+            incomplete_count=len(relevant) - complete_count,
+        )
+
+        if request_conflict:
+            return self._finish(
+                InvalidMatch("Cached request IDs conflict with the current track.")
+            )
+        if track.catalogId:
+            if track.catalogId in conflicting_ids:
+                return self._finish(
+                    InvalidMatch("Complete cached metadata conflicts for the requested catalog ID.")
                 )
-            return NotFound("No cached song resource matches the requested catalog ID.")
+            matches = matched_by_id.get(track.catalogId, [])
+            if matches:
+                return self._finish(self._select_best(matches))
+            if any(self._metadata_complete(song) for song in relevant):
+                return self._finish(
+                    InvalidMatch("Cached metadata conflicts for the requested catalog ID.")
+                )
+            if off_id_metadata_matches:
+                return self._finish(InvalidMatch(
+                    "Cached metadata matches a different catalog ID than the requested one."
+                ))
+            return self._finish(
+                NotFound("No complete cached song matches the requested catalog ID.")
+            )
 
-        if identity_conflicts & set(candidates):
-            return InvalidMatch("Cached metadata conflicts for a matching catalog ID.")
-        if relevant_conflicts:
-            return InvalidMatch("Cached request IDs conflict with the current track.")
-        for catalog_id in identity_conflicts:
-            candidates.pop(catalog_id, None)
-        if len(candidates) > 1:
-            return Ambiguous("Multiple cached catalog IDs match the current track.")
-        if len(candidates) == 1:
-            return next(iter(candidates.values()))
+        matching_ids = set(matched_by_id)
+        if conflicting_ids & matching_ids:
+            return self._finish(
+                InvalidMatch("Complete cached metadata conflicts for a matching catalog ID.")
+            )
+        if len(matching_ids) > 1:
+            return self._finish(
+                Ambiguous("Multiple cached catalog IDs match the current track.")
+            )
+        if matching_ids:
+            catalog_id = next(iter(matching_ids))
+            return self._finish(self._select_best(matched_by_id[catalog_id]))
 
-        return NotFound("No cached song resource matches the current track.")
+        return self._finish(NotFound("No cached song resource matches the current track."))
+
+    def _set_diagnostics(
+        self,
+        candidate_count: int,
+        complete_count: int,
+        matched_count: int,
+        incomplete_count: int,
+    ) -> None:
+        self.last_diagnostics = {
+            "candidateCount": candidate_count,
+            "completeCandidateCount": complete_count,
+            "matchedCandidateCount": matched_count,
+            "incompleteCandidateCount": incomplete_count,
+            "finalStatus": "notFound",
+        }
+
+    def _finish(self, result: Union[CatalogSong, NotFound, Ambiguous, InvalidMatch]):
+        self.last_diagnostics["finalStatus"] = (
+            "matched" if isinstance(result, CatalogSong)
+            else "ambiguous" if isinstance(result, Ambiguous)
+            else "invalid" if isinstance(result, InvalidMatch)
+            else "notFound"
+        )
+        return result
+
+    @classmethod
+    def _metadata_complete(cls, song: CatalogSong) -> bool:
+        return (
+            bool(normalize_text(song.title))
+            and bool(normalize_text(song.artist))
+            and bool(normalize_text(song.album))
+            and song.durationMilliseconds is not None
+            and math.isfinite(song.durationMilliseconds)
+            and song.durationMilliseconds > 0
+        )
+
+    @classmethod
+    def _select_best(cls, candidates: Sequence[CatalogSong]) -> CatalogSong:
+        best = max(candidates, key=cls._candidate_completeness)
+        return cls._merge_candidate(best, *candidates)
+
+    @staticmethod
+    def _candidate_completeness(song: CatalogSong) -> int:
+        return sum((
+            bool(normalize_text(song.title)),
+            bool(normalize_text(song.artist)),
+            bool(normalize_text(song.album)),
+            song.durationMilliseconds is not None
+            and math.isfinite(song.durationMilliseconds)
+            and song.durationMilliseconds > 0,
+        ))
 
     @staticmethod
     def _valid_track(track: CurrentTrack) -> bool:
@@ -669,37 +901,19 @@ class TrackMatcher:
         )
 
     @staticmethod
-    def _merge_metadata(
-        previous: Optional[CatalogSong],
-        current: CatalogSong,
-    ) -> CatalogSong:
-        if previous is None:
-            return current
-        return CatalogSong(
-            catalogId=current.catalogId,
-            title=current.title or previous.title,
-            artist=current.artist or previous.artist,
-            album=current.album or previous.album,
-            durationMilliseconds=(
-                current.durationMilliseconds or previous.durationMilliseconds
-            ),
-            lyrics=previous.lyrics or current.lyrics,
-        )
-
-    @staticmethod
     def _merge_candidate(
-        previous: Optional[CatalogSong],
-        current: CatalogSong,
+        selected: CatalogSong,
+        *others: CatalogSong,
     ) -> CatalogSong:
-        if previous is None:
-            return current
         return CatalogSong(
-            catalogId=current.catalogId,
-            title=current.title,
-            artist=current.artist,
-            album=current.album,
-            durationMilliseconds=current.durationMilliseconds,
-            lyrics=tuple(dict.fromkeys(previous.lyrics + current.lyrics)),
+            catalogId=selected.catalogId,
+            title=selected.title,
+            artist=selected.artist,
+            album=selected.album,
+            durationMilliseconds=selected.durationMilliseconds,
+            lyrics=tuple(dict.fromkeys(
+                lyric for candidate in (selected,) + others for lyric in candidate.lyrics
+            )),
         )
 
 

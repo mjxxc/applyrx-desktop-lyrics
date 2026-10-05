@@ -78,6 +78,7 @@ from Foundation import NSMutableAttributedString, NSObject, NSMakeRange, NSTimer
 from PyObjCTools import AppHelper
 
 import main as core
+from lyrics_panel_bridge import PanelBridge
 
 
 PANEL_WIDTH = 980
@@ -462,6 +463,7 @@ class AppDelegate(NSObject):
     drag_unlock_timer = None
     desktop_click_through = True
     lyrics_window = None
+    native_panel_bridge = None
     last_key = None
     lines = None
     meta = None
@@ -494,6 +496,7 @@ class AppDelegate(NSObject):
         self.meta = None
         self.last_key = None
         self.lyrics_window = FullLyricsWindow.alloc().init()
+        self.native_panel_bridge = PanelBridge()
 
         frame = self._desktopFrame()
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -519,6 +522,8 @@ class AppDelegate(NSObject):
             self.window.orderFrontRegardless()
 
         self.makeStatusItem()
+        if bool(CONFIG["desktop_visible"]):
+            self._startNativePanel()
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.12,
             self,
@@ -624,6 +629,21 @@ class AppDelegate(NSObject):
         menu.addItem_(quit_item)
         self.status_item.setMenu_(menu)
 
+    def _startNativePanel(self):
+        try:
+            self.native_panel_bridge.start()
+            if self.window is not None:
+                self.window.orderOut_(None)
+            if self.lyrics_window is not None:
+                self.lyrics_window.close()
+            log("SwiftUI lyrics panel started")
+            return True
+        except Exception as exc:
+            log(f"SwiftUI lyrics panel unavailable: {exc}")
+            if self.window is not None and bool(CONFIG["desktop_visible"]):
+                self.window.orderFrontRegardless()
+            return False
+
     def refreshMenu(self):
         if self.desktop_menu_item is not None:
             self.desktop_menu_item.setTitle_("隐藏桌面歌词" if bool(CONFIG["desktop_visible"]) else "显示桌面歌词")
@@ -715,9 +735,13 @@ class AppDelegate(NSObject):
         CONFIG["desktop_visible"] = not bool(CONFIG["desktop_visible"])
         save_config()
         if bool(CONFIG["desktop_visible"]):
-            self.window.orderFrontRegardless()
+            if not self._startNativePanel():
+                self.window.orderFrontRegardless()
         else:
-            self.window.orderOut_(None)
+            if self.native_panel_bridge is not None:
+                self.native_panel_bridge.stop()
+            if self.window is not None:
+                self.window.orderOut_(None)
         self.refreshMenu()
 
     def setDesktopClickThroughEnabled_(self, enabled):
@@ -833,6 +857,9 @@ class AppDelegate(NSObject):
 
     def tick_(self, timer):
         try:
+            if (self.native_panel_bridge is not None
+                    and self.native_panel_bridge.is_running):
+                return
             now = time.monotonic()
             if self.lines and self.player and now - self.last_full_check_at < 1.0:
                 self._render_state(self._effective_player(self.player, now))
@@ -879,6 +906,10 @@ class AppDelegate(NSObject):
             self.refreshMenu()
         except Exception:
             log("tick error:\n" + traceback.format_exc())
+
+    def applicationWillTerminate_(self, notification):
+        if self.native_panel_bridge is not None:
+            self.native_panel_bridge.stop()
 
 
 def main():

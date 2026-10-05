@@ -61,8 +61,10 @@ already cached and replays it with the same headers.
 
 - **Apple Music native lyrics** from the local TTML cache — same source as the
   in-app lyrics panel.
-- **Desktop overlay** that is click-through by default, with temporary drag
-  unlock, adjustable size, and optional background.
+- **SwiftUI + AppKit desktop overlay** in a floating, non-activating `NSPanel`.
+  It is click-through by default; `Control-Option-Command-L` toggles visibility
+  and `Control-Option-Command-M` enables a 10-second drag mode before restoring
+  click-through.
 - **Menu bar lyric** showing the current line; can be toggled off.
 - **Full-lyrics window** with current-line highlighting and smooth scrolling.
 - **CLI** (`applyrx_cli.py`) with `state`, `current-line`, `lyrics`, and
@@ -103,6 +105,14 @@ will pick up the TTML cache and start rendering synchronized lyrics.
 ./scripts/build_app.sh
 open dist/Applyrx.app
 ```
+
+The build compiles `native/ApplyrxLyricsPanel.swift` and embeds the native panel
+in the app bundle.
+Python 3.10 or newer is required. The scripts select a compatible installed
+`python3`/`python3.10`–`python3.13`, or accept `APPLYRX_PYTHON=/path/to/python`.
+If none is available, they stop without modifying system Python.
+Manual macOS hotkey and playback acceptance steps are documented in
+[`docs/ACCEPTANCE_MACOS.md`](./docs/ACCEPTANCE_MACOS.md).
 
 The bundle currently expects to run from the project directory and uses the
 local `venv`. A fully standalone, notarized distributable is planned; see

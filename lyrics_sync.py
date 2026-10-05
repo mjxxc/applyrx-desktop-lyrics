@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import logging
 import time
-from concurrent.futures import Executor, Future
+from bisect import bisect_right
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Sequence, Tuple, Union
 
@@ -59,6 +61,29 @@ class ManagerState:
 class Clock(Protocol):
     def __call__(self) -> float:
         ...
+
+
+@dataclass(frozen=True)
+class _PendingLyricsRequest:
+    generation: int
+    key: Tuple[str, ...]
+    future: Future
+    started_at: float
+    attempt: int
+    is_retry: bool
+
+
+def _format_delay(seconds: float) -> str:
+    return str(int(seconds)) if float(seconds).is_integer() else str(seconds)
+
+
+_LYRICS_LOGGER = logging.getLogger("applyrx.lyrics")
+_LYRICS_LOGGER.setLevel(logging.INFO)
+if not _LYRICS_LOGGER.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(message)s"))
+    _LYRICS_LOGGER.addHandler(_handler)
+    _LYRICS_LOGGER.propagate = False
 
 
 class NowPlayingWatcher:
@@ -181,7 +206,6 @@ class LyricsEngine:
         if not lines:
             return False
         previous_start = -math.inf
-        previous_end = -math.inf
         for line in lines:
             if (isinstance(line.startTime, bool) or isinstance(line.endTime, bool)
                     or not isinstance(line.startTime, (int, float))
@@ -192,11 +216,9 @@ class LyricsEngine:
             except (TypeError, ValueError):
                 return False
             if (not math.isfinite(start) or not math.isfinite(end)
-                    or start < 0 or end <= start or start < previous_start
-                    or start < previous_end):
+                    or start < 0 or end <= start or start <= previous_start):
                 return False
             previous_start = start
-            previous_end = end
             if not isinstance(line.words, (tuple, list)):
                 return False
             for word in line.words:
@@ -224,23 +246,41 @@ class LyricsEngine:
             return LyricsPosition(now, None, None, None, None)
 
         lines = self.lyrics.lines
-        previous = None
-        next_line = None
-        for index, line in enumerate(lines):
-            if line.startTime <= now < line.endTime:
-                previous = lines[index - 1] if index > 0 else None
-                next_line = lines[index + 1] if index + 1 < len(lines) else None
-                return LyricsPosition(now, index, line, previous, next_line)
-            if line.endTime <= now:
-                previous = line
-            elif line.startTime > now:
-                next_line = line
-                break
-        return LyricsPosition(now, None, None, previous, next_line)
+        starts = [line.startTime for line in lines]
+        index = bisect_right(starts, now) - 1
+        if index < 0:
+            return LyricsPosition(
+                now,
+                None,
+                None,
+                None,
+                lines[0],
+            )
+
+        candidate = lines[index]
+        if now < candidate.endTime:
+            return LyricsPosition(
+                now,
+                index,
+                candidate,
+                lines[index - 1] if index > 0 else None,
+                lines[index + 1] if index + 1 < len(lines) else None,
+            )
+
+        return LyricsPosition(
+            now,
+            None,
+            None,
+            candidate,
+            lines[index + 1] if index + 1 < len(lines) else None,
+        )
 
 
 class CurrentTrackManager:
     """Clear-on-change manager with stale asynchronous result protection."""
+
+    RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0, 15.0)
+    MAX_RETRY_DELAY = 30.0
 
     def __init__(
         self,
@@ -250,7 +290,11 @@ class CurrentTrackManager:
         provider_timeout: float = 8.0,
     ):
         self.provider = provider
-        self.executor = executor
+        self._owns_executor = executor is None
+        self.executor = executor or ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="lyrics-provider",
+        )
         self.clock = clock
         self.provider_timeout = max(0.1, float(provider_timeout))
         self.engine = LyricsEngine()
@@ -260,7 +304,9 @@ class CurrentTrackManager:
         self.matchStatus = "notFound"
         self.message: Optional[str] = None
         self._generation = 0
-        self._pending: Optional[Tuple[int, Tuple[str, ...], Future, float]] = None
+        self._pending: Optional[_PendingLyricsRequest] = None
+        self._retry_index = 0
+        self._next_retry_at: Optional[float] = None
         self._last_snapshot: Optional[PlaybackSnapshot] = None
 
     def update(self, snapshot: PlaybackSnapshot) -> ManagerState:
@@ -270,6 +316,7 @@ class CurrentTrackManager:
         if key != self.currentKey:
             self._switch_track(track, key)
         self._resolve_pending()
+        self._start_due_retry()
 
         playback_position = snapshot.position if track is not None else 0.0
         lyric_position = self.engine.locate(
@@ -289,9 +336,13 @@ class CurrentTrackManager:
         track: Optional[CurrentTrack],
         key: Optional[Tuple[str, ...]],
     ) -> None:
+        if self._next_retry_at is not None or (
+            self._pending is not None and self._pending.is_retry
+        ):
+            self._log("[LYRICS] retry cancelled: track changed")
         self._generation += 1
         if self._pending is not None:
-            self._pending[2].cancel()
+            self._pending.future.cancel()
         self.currentKey = key
         self.currentTrack = track
         self.currentCatalogId = track.catalogId if track else None
@@ -299,47 +350,75 @@ class CurrentTrackManager:
         self.matchStatus = "notFound"
         self.message = None
         self._pending = None
+        self._retry_index = 0
+        self._next_retry_at = None
         if track is None:
             self.message = "No current track."
             return
 
-        generation = self._generation
-        if self.executor is None:
-            try:
-                result = self.provider.get_lyrics(track)
-            except Exception:
-                result = InvalidMatch("Lyrics provider failed.")
-            self._apply_result(result, generation, key)
+        self._submit_request(is_retry=False)
+
+    def _submit_request(self, is_retry: bool) -> None:
+        track = self.currentTrack
+        key = self.currentKey
+        if track is None or key is None:
             return
+        generation = self._generation
+        attempt = self._retry_index if is_retry else 0
         try:
             future = self.executor.submit(self.provider.get_lyrics, track)
         except Exception:
+            self._next_retry_at = None
             self.matchStatus = "invalid"
             self.message = "Lyrics provider request could not be started."
+            self._log("[LYRICS] invalid: provider request could not start")
             return
-        self._pending = (generation, key, future, self.clock())
+        self._pending = _PendingLyricsRequest(
+            generation=generation,
+            key=key,
+            future=future,
+            started_at=self.clock(),
+            attempt=attempt,
+            is_retry=is_retry,
+        )
+        self._next_retry_at = None
         self.matchStatus = "loading"
+        self.message = None
+        self._log(
+            "[LYRICS] request generation={} attempt={}{}".format(
+                generation,
+                attempt,
+                " retry" if is_retry else "",
+            )
+        )
+
+    def _start_due_retry(self) -> None:
+        if (self._next_retry_at is None or self._pending is not None
+                or self.currentTrack is None or self.currentKey is None
+                or self.clock() < self._next_retry_at):
+            return
+        self._submit_request(is_retry=True)
 
     def _resolve_pending(self) -> None:
         pending = self._pending
         if pending is None:
             return
-        generation, key, future, started_at = pending
-        if self.clock() - started_at > self.provider_timeout:
+        if self.clock() - pending.started_at > self.provider_timeout:
             self._pending = None
             self.matchStatus = "timeout"
             self.message = "Lyrics provider timed out; no previous lyrics are retained."
             return
-        if not future.done():
+        if not pending.future.done():
             return
         self._pending = None
-        if generation != self._generation or key != self.currentKey:
+        if (pending.generation != self._generation
+                or pending.key != self.currentKey):
             return
         try:
-            result = future.result()
+            result = pending.future.result()
         except Exception:
             result = InvalidMatch("Lyrics provider failed.")
-        self._apply_result(result, generation, key)
+        self._apply_result(result, pending.generation, pending.key)
 
     def _apply_result(
         self,
@@ -370,22 +449,56 @@ class CurrentTrackManager:
                 self.currentTrack.catalogId if self.currentTrack else None
             )
             self.message = None
+            self._next_retry_at = None
+            self._retry_index = 0
+            self._log(
+                "[LYRICS] matched generation={} catalogId={} lines={}".format(
+                    generation, self.currentCatalogId, len(result.lines)
+                )
+            )
         elif isinstance(result, Ambiguous):
             self.engine.clear()
             self.matchStatus = "ambiguous"
             self.message = result.message
+            self._next_retry_at = None
+            self._log("[LYRICS] ambiguous generation={}".format(generation))
         elif isinstance(result, InvalidMatch):
             self.engine.clear()
             self.matchStatus = "invalid"
             self.message = result.message
+            self._next_retry_at = None
+            self._log("[LYRICS] invalid generation={}".format(generation))
         elif isinstance(result, NotFound):
             self.engine.clear()
             self.matchStatus = "notFound"
             self.message = result.message
+            delay = self._retry_delay()
+            self._next_retry_at = self.clock() + delay
+            self._retry_index += 1
+            self._log("[LYRICS] notFound generation={}".format(generation))
+            self._log("[LYRICS] retry in {}s".format(_format_delay(delay)))
         else:
             self.engine.clear()
             self.matchStatus = "invalid"
             self.message = "Lyrics provider returned an unsupported result."
+            self._next_retry_at = None
+            self._log("[LYRICS] invalid: unsupported provider result")
+
+    def _retry_delay(self) -> float:
+        if self._retry_index < len(self.RETRY_DELAYS):
+            return self.RETRY_DELAYS[self._retry_index]
+        return self.MAX_RETRY_DELAY
+
+    @staticmethod
+    def _log(message: str) -> None:
+        _LYRICS_LOGGER.info(message)
+
+    def close(self) -> None:
+        if self._pending is not None:
+            self._pending.future.cancel()
+            self._pending = None
+        if self._owns_executor:
+            self.executor.shutdown(wait=False, cancel_futures=True)
 
 
 def track_identity(track: Optional[CurrentTrack]) -> Optional[Tuple[str, ...]]:

@@ -117,22 +117,25 @@ def run_live(
                 executor=executor,
                 provider_timeout=8.0,
             )
-            while True:
-                snapshot = watcher.poll()
-                state = manager.update(snapshot)
-                signature = state_signature(state)
-                changed = signature != last_signature
-                track_key = track_identity(snapshot.track)
-                track_changed = track_key != last_track_key
-                report_snapshot(state, changed, track_changed)
-                last_signature = signature
-                last_track_key = track_key
-                count += 1
-                if max_ticks is not None and count >= max_ticks:
-                    return 0
-                if duration is not None and time.monotonic() - start >= duration:
-                    return 0
-                time.sleep(max(0.05, interval))
+            try:
+                while True:
+                    snapshot = watcher.poll()
+                    state = manager.update(snapshot)
+                    signature = state_signature(state)
+                    changed = signature != last_signature
+                    track_key = track_identity(snapshot.track)
+                    track_changed = track_key != last_track_key
+                    report_snapshot(state, changed, track_changed)
+                    last_signature = signature
+                    last_track_key = track_key
+                    count += 1
+                    if max_ticks is not None and count >= max_ticks:
+                        return 0
+                    if duration is not None and time.monotonic() - start >= duration:
+                        return 0
+                    time.sleep(max(0.05, interval))
+            finally:
+                manager.close()
     except KeyboardInterrupt:
         return 0
 

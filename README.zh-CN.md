@@ -49,7 +49,7 @@ Apple Music.app ──播放──▶ 向 /ttmlLyrics 发已签名请求 ──�
 ## 功能
 
 - **Apple Music 原生歌词**：直接读取本地 TTML 缓存，和应用内歌词面板同源。
-- **桌面悬浮歌词**：默认点击穿透，不影响下面窗口；可临时解锁拖动位置，字号可调，背景可隐藏。
+- **桌面悬浮歌词**：SwiftUI + AppKit `NSPanel`，底部居中、置顶且不抢焦点；默认全窗点击穿透，歌词行由实时同步引擎提供。按 `⌃⌥⌘L` 显示/隐藏，按 `⌃⌥⌘M` 临时进入 10 秒拖动模式，之后自动恢复点击穿透。
 - **菜单栏歌词**：显示当前句歌词，可一键关闭。
 - **完整歌词窗口**：当前行高亮，平滑滚动。
 - **CLI**（`applyrx_cli.py`）：提供 `state`、`current-line`、`lyrics`、`watch` 四个子命令，输出对脚本友好的 JSON。
@@ -83,7 +83,9 @@ cd applyrx
 open dist/Applyrx.app
 ```
 
-当前的 `.app` bundle 属于本地开发版，运行时依赖项目目录下的 `venv` 和源码辅助文件。完整独立、已公证的发行包见 [`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md)。
+构建会先编译 `native/ApplyrxLyricsPanel.swift`，再将原生面板嵌入 `.app`。快捷键为 `⌃⌥⌘L`（显示/隐藏）和 `⌃⌥⌘M`（临时拖动 10 秒）。当前 bundle 属于本地开发版，运行时依赖项目目录下的 `venv` 和源码辅助文件。完整独立、已公证的发行包见 [`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md)。
+
+构建要求 Python 3.10 或更新版本；脚本会优先选用兼容的 `python3`，否则查找本机 `python3.13` 至 `python3.10`。可用 `APPLYRX_PYTHON=/path/to/python3.12` 指定解释器。没有兼容解释器时脚本会停止并给出安装建议，不会修改系统 Python。快捷键和 Music 播放同步的手动验收步骤见 [`docs/ACCEPTANCE_MACOS.md`](./docs/ACCEPTANCE_MACOS.md)。
 
 ## CLI
 

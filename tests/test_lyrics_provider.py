@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import lyrics_demo
 from lyrics_provider import (
@@ -107,6 +108,104 @@ class TrackMatchingTests(unittest.TestCase):
         ], track(catalogId=TRACK_ID))
         self.assertEqual(TRACK_ID, result.catalogId)
         self.assertEqual(TRACK_ID, result.lyrics[0].catalogId)
+
+    def test_complete_match_with_incomplete_same_id_candidate_matches(self):
+        incomplete = song_resource(
+            title="Current Track",
+            artist=None,
+            album=None,
+            duration_ms=None,
+            ttml="",
+        )
+        responses = [
+            response(song_resource()),
+            response(incomplete),
+        ]
+        parsed = [CatalogResponseParser().parse(item) for item in responses]
+        matcher = TrackMatcher()
+
+        result = matcher.match(track(catalogId=TRACK_ID), responses, parsed)
+
+        self.assertEqual(TRACK_ID, result.catalogId)
+        self.assertEqual(LYRIC_TTML, result.lyrics[0].ttml)
+        self.assertEqual({
+            "candidateCount": 2,
+            "completeCandidateCount": 1,
+            "matchedCandidateCount": 1,
+            "incompleteCandidateCount": 1,
+            "finalStatus": "matched",
+        }, matcher.last_diagnostics)
+
+    def test_two_complete_consistent_same_id_candidates_match(self):
+        result = match([
+            song_resource(),
+            song_resource(ttml=LYRIC_TTML.replace("Hello world", "duplicate")),
+        ], track(catalogId=TRACK_ID))
+
+        self.assertEqual(TRACK_ID, result.catalogId)
+        self.assertEqual(2, len(result.lyrics))
+
+    def test_two_complete_conflicting_same_id_candidates_are_invalid(self):
+        result = match([
+            song_resource(),
+            song_resource(title="Different Complete Track"),
+        ], track(catalogId=TRACK_ID))
+
+        self.assertIsInstance(result, InvalidMatch)
+
+    def test_complete_wrong_track_with_same_catalog_id_is_not_matched(self):
+        result = match([
+            song_resource(
+                title="Different Complete Track",
+                artist="Different Artist",
+                album="Different Album",
+                duration_ms=240000,
+            ),
+        ], track(catalogId=TRACK_ID))
+
+        self.assertIsInstance(result, InvalidMatch)
+        self.assertNotIsInstance(result, Lyrics)
+
+    def test_only_incomplete_same_id_candidates_are_not_found(self):
+        responses = [response(song_resource(
+            title="Current Track",
+            artist=None,
+            album=None,
+            duration_ms=None,
+            ttml="",
+        ))]
+        parsed = [CatalogResponseParser().parse(item) for item in responses]
+        matcher = TrackMatcher()
+        result = matcher.match(track(catalogId=TRACK_ID), responses, parsed)
+
+        self.assertIsInstance(result, NotFound)
+        self.assertEqual("notFound", matcher.last_diagnostics["finalStatus"])
+
+    def test_provider_selects_complete_match_over_incomplete_same_id_record(self):
+        incomplete = song_resource(
+            title="Current Track",
+            artist=None,
+            album=None,
+            duration_ms=None,
+            ttml="",
+        )
+        provider = AppleMusicCacheProvider(scanner=ProviderTests.FakeScanner([
+            response(song_resource()),
+            response(incomplete),
+        ]))
+
+        result = provider.get_lyrics(track(catalogId=TRACK_ID))
+
+        self.assertIsInstance(result, Lyrics)
+        self.assertEqual(TRACK_ID, result.catalogId)
+        self.assertEqual(1, len(result.lines))
+        self.assertEqual({
+            "candidateCount": 2,
+            "completeCandidateCount": 1,
+            "matchedCandidateCount": 1,
+            "incompleteCandidateCount": 1,
+            "finalStatus": "matched",
+        }, provider.matcher.last_diagnostics)
 
     def test_title_mismatch_for_catalog_id_is_invalid(self):
         result = match([song_resource(title="Different")], track(catalogId=TRACK_ID))
@@ -216,6 +315,8 @@ class TrackMatchingTests(unittest.TestCase):
 
 
 class TTMLParserTests(unittest.TestCase):
+    FIXTURE = Path(__file__).parent / "fixtures" / "apple_music_syllable_timing.xml"
+
     def test_parses_timed_lines_and_inherited_language(self):
         document = (
             "<tt xmlns='http://www.w3.org/ns/ttml' xml:lang='zh-Hans'>"
@@ -241,6 +342,127 @@ class TTMLParserTests(unittest.TestCase):
         self.assertEqual(2, len(lyrics.lines[0].words))
         self.assertEqual(1.0, lyrics.lines[0].words[0].startTime)
         self.assertEqual(1.7, lyrics.lines[0].words[1].startTime)
+
+    def test_parses_bare_seconds_and_clock_time_formats(self):
+        expected = {
+            "41.955": 41.955,
+            "0.500": 0.5,
+            "1.0": 1.0,
+            "1": 1.0,
+            "00:41.955": 41.955,
+            "00:00:41.955": 41.955,
+            "00:01:02.500": 62.5,
+            "500ms": 0.5,
+            "0.5s": 0.5,
+            "1m": 60.0,
+            "1h": 3600.0,
+        }
+        for value, seconds in expected.items():
+            with self.subTest(value=value):
+                self.assertAlmostEqual(seconds, TTMLParser._parse_time(value))
+
+    def test_absolute_child_timing_is_not_added_to_parent_twice(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><body dur='300.395'>"
+            "<div begin='111.437' end='143.591'>"
+            "<p begin='111.437' end='118.419'>"
+            "<span begin='111.437' end='112.000'>word</span>"
+            "</p></div></body></tt>"
+        )
+        line = TTMLParser().parse(document).lines[0]
+        self.assertAlmostEqual(111.437, line.startTime)
+        self.assertAlmostEqual(118.419, line.endTime)
+        self.assertAlmostEqual(111.437, line.words[0].startTime)
+        self.assertAlmostEqual(112.0, line.words[0].endTime)
+
+    def test_local_child_timing_is_still_relative_to_its_parent(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><body>"
+            "<div begin='10s' end='20s'><p begin='1s' end='3s'>local</p>"
+            "</div></body></tt>"
+        )
+        line = TTMLParser().parse(document).lines[0]
+        self.assertEqual(11.0, line.startTime)
+        self.assertEqual(13.0, line.endTime)
+
+    def test_local_times_inside_parent_range_are_not_mistaken_for_absolute(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><body>"
+            "<div begin='10s' end='20s'><p begin='11s' end='13s'>local</p>"
+            "</div></body></tt>"
+        )
+        line = TTMLParser().parse(document).lines[0]
+        self.assertEqual(21.0, line.startTime)
+        self.assertEqual(23.0, line.endTime)
+
+    def test_multiple_absolute_divisions_do_not_accumulate_drift(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><body dur='300.395'>"
+            "<div begin='41.955' end='76.242'>"
+            "<p begin='41.955' end='48.922'>a</p>"
+            "<p begin='49.360' end='57.903'>b</p></div>"
+            "<div begin='111.437' end='143.591'>"
+            "<p begin='111.437' end='118.419'>c</p>"
+            "<p begin='118.942' end='126.942'>d</p></div>"
+            "</body></tt>"
+        )
+        lines = TTMLParser().parse(document).lines
+        self.assertEqual([41.955, 49.360, 111.437, 118.942],
+                         [line.startTime for line in lines])
+
+    def test_redacted_real_apple_music_fixture_preserves_all_main_lyric_lines(self):
+        document = self.FIXTURE.read_text(encoding="utf-8")
+        root = ET.fromstring(document)
+        local_name = lambda element: element.tag.rsplit("}", 1)[-1]
+        raw_paragraphs = [
+            element for element in root.iter()
+            if local_name(element) == "p"
+        ]
+        lyrics = TTMLParser().parse(document)
+
+        self.assertEqual(18, len(raw_paragraphs))
+        self.assertEqual(18, len(lyrics.lines))
+        self.assertAlmostEqual(41.955, lyrics.lines[0].startTime)
+        self.assertAlmostEqual(260.183, lyrics.lines[-1].startTime)
+        self.assertAlmostEqual(270.680, lyrics.lines[-1].endTime)
+        self.assertLess(lyrics.lines[-1].endTime, 300.395)
+        self.assertFalse(any(line.startTime >= 500 for line in lyrics.lines))
+
+    def test_real_fixture_restores_timed_words_without_changing_line_text(self):
+        document = self.FIXTURE.read_text(encoding="utf-8")
+        root = ET.fromstring(document)
+        local_name = lambda element: element.tag.rsplit("}", 1)[-1]
+        timed_spans = [
+            element for element in root.iter()
+            if local_name(element) == "span"
+            and any(name in element.attrib for name in ("begin", "end", "dur"))
+        ]
+        lyrics = TTMLParser().parse(document)
+
+        self.assertEqual(171, len(timed_spans))
+        self.assertEqual(171, sum(len(line.words) for line in lyrics.lines))
+        self.assertTrue(lyrics.hasWordTiming)
+        self.assertEqual("x" * len(lyrics.lines[0].words), lyrics.lines[0].text)
+
+    def test_untimed_span_inherits_parent_line_interval(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><body>"
+            "<p begin='1s' end='3s'><span>word</span></p>"
+            "</body></tt>"
+        )
+        line = TTMLParser().parse(document).lines[0]
+        self.assertEqual(1.0, line.words[0].startTime)
+        self.assertEqual(3.0, line.words[0].endTime)
+
+    def test_head_transliteration_is_not_parsed_as_an_extra_lyric_line(self):
+        document = (
+            "<tt xmlns='http://www.w3.org/ns/ttml'><head><metadata>"
+            "<transliterations><text>romanized metadata</text></transliterations>"
+            "</metadata></head><body><p begin='1s' end='2s'>main</p></body></tt>"
+        )
+        lyrics = TTMLParser().parse(document)
+        self.assertEqual(1, len(lyrics.lines))
+        self.assertEqual("main", lyrics.lines[0].text)
 
     def test_rejects_ttml_without_a_time_axis(self):
         with self.assertRaises(TTMLParseError):
