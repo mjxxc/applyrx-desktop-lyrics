@@ -19,7 +19,6 @@ from xml.etree import ElementTree as ET
 
 CACHE_DB_CANDIDATES = [
     Path.home() / "Library/Caches/com.apple.Music/Cache.db",
-    Path("/Users/rakel/Library/Caches/com.apple.Music/Cache.db"),
 ]
 
 TEMP_DIRS: list[str] = []

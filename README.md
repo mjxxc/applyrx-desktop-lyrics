@@ -1,246 +1,198 @@
 # Applyrx
 
-<p align="center">
-  <a href="./README.md">English</a> ·
-  <a href="./README.zh-CN.md">简体中文</a>
-</p>
+Applyrx is an unofficial macOS desktop lyrics overlay for Apple Music. It reads
+timed lyrics from Apple Music's local cache and displays them in a synchronized,
+click-through desktop panel with menu bar integration.
 
-<p align="center">
-  <strong>Native, frame-accurate Apple Music lyrics for macOS.</strong><br>
-  Desktop overlay · Menu bar · Full-lyrics window · CLI
-</p>
-
----
-
-Applyrx is a macOS live-lyrics application for Apple Music, inspired by the
-desktop-overlay experience popularized by [LyricsX](https://github.com/ddddxxx/LyricsX).
-Instead of querying third-party providers, Applyrx reads Apple Music's own
-signed TTML lyric responses directly from the local `NSURLCache` — so the
-lyrics are byte-for-byte identical to what the Apple Music app itself renders,
-including official translations, romaji, and word-level timing where Apple
-provides it.
-
-Applyrx never guesses. If the currently playing track cannot be unambiguously
-matched against a cached TTML entry by Apple catalog id, title, artist, and
-duration, Applyrx surfaces an explicit error instead of displaying lyrics from
-the wrong song.
+This project is based on and inspired by the MIT-licensed
+[Applyrx](https://github.com/rakei076/applyrx) project. It is an independent,
+unofficial third-party tool and is not affiliated with, endorsed by, or
+sponsored by Apple.
 
 ## Demo
 
-![Applyrx desktop lyric demo](./assets/applyrx-demo.gif)
+![Applyrx desktop lyrics demo](./assets/applyrx-demo.gif)
 
 [Download the silent MP4 demo](./assets/applyrx-demo.mp4).
 
-## How It Works
-
-```
-Apple Music.app ──plays──▶ signed request to /ttmlLyrics ──▶ NSURLCache (Cache.db)
-                                                                    │
-                                                                    ▼
-                                        ┌───────────────────────────────────┐
-                                        │ Applyrx                           │
-                                        │                                   │
-    AppleScript (player state) ────────▶│  1. read current track metadata   │
-                                        │  2. resolve adam_id via iTunes    │
-                                        │  3. locate matching TTML cache    │
-                                        │  4. replay signed request (curl)  │
-                                        │  5. parse TTML → timed lines      │
-                                        │  6. render UI / emit CLI events   │
-                                        └───────────────────────────────────┘
-                                                         │
-                         ┌───────────────────────────────┼───────────────────────────────┐
-                         ▼                               ▼                               ▼
-                Desktop overlay                   Menu bar lyric                       CLI
-```
-
-No private entitlements, no Accessibility hacks, no re-implementation of
-Apple's signing. Applyrx simply reuses the signed request that Music.app has
-already cached and replays it with the same headers.
-
 ## Features
 
-- **Apple Music native lyrics** from the local TTML cache — same source as the
-  in-app lyrics panel.
-- **SwiftUI + AppKit desktop overlay** in a floating, non-activating `NSPanel`.
-  It is click-through by default; `Control-Option-Command-L` toggles visibility
-  and `Control-Option-Command-M` enables a 10-second drag mode before restoring
-  click-through.
-- **Menu bar lyric** showing the current line; can be toggled off.
-- **Full-lyrics window** with current-line highlighting and smooth scrolling.
-- **CLI** (`applyrx_cli.py`) with `state`, `current-line`, `lyrics`, and
-  `watch` subcommands, all JSON-friendly for scripting and integrations.
-- **Strict match policy**: catalog id + title + artist + duration must agree.
-  Traditional/simplified Chinese is normalized, and a unique-duration fallback
-  handles storefront title mismatches.
-- **Multi-storefront lookup** (CN/TW/US) so Apple Music CN catalog ids resolve
-  correctly.
-- **Offline after first play**: once a song's TTML is cached by Apple Music,
-  Applyrx needs no network access.
-- **Local JSON config** at `~/.applyrx/config.json`, editable from the menu
-  bar.
+- Synchronized Apple Music lyrics in a desktop overlay.
+- Menu bar integration and a native SwiftUI lyrics panel.
+- Reads catalog/song responses and `syllable-lyrics` TTML from the local Apple
+  Music `Cache.db` and `fsCachedData` cache.
+- Parses TTML into timed lyric lines; retains word timing where Apple supplies
+  it. The panel displays synchronized lines, not karaoke-style word highlighting.
+- Strict track matching: incomplete or conflicting metadata is not guessed.
+- Retries a local cache lookup after a track initially has no match.
+- Follows Music playback position, including pause, resume, and seeking.
+- Click-through overlay with a temporary drag mode that restores click-through.
+- Global shortcuts: `Control-Option-Command-L` toggles the desktop lyrics panel;
+  `Control-Option-Command-M` temporarily enables drag mode.
 
 ## Requirements
 
-- macOS with Apple Music.app
-- Python 3.11 or newer
-- The in-app lyrics panel opened at least once for the current song, so
-  Apple Music populates its TTML cache
-- Automation permission for Music.app (macOS will prompt on first run)
+- macOS with Apple Music.app.
+- Python 3.10 or newer for development and building; the v0.1.0 release build
+  was produced with Python 3.12.
+- Apple Music must have cached lyrics for the song. Opening the built-in lyrics
+  panel in Music may be necessary to populate local cache data.
+- macOS Automation permission for reading the current Apple Music track.
 
-## Quick Start
+## Installation
+
+Clone the repository and install its Python dependencies in a project-local
+virtual environment:
 
 ```bash
-git clone https://github.com/rakei076/applyrx.git
-cd applyrx
+git clone https://github.com/<owner>/applyrx-desktop-lyrics.git
+cd applyrx-desktop-lyrics
 ./scripts/bootstrap.sh
+```
+
+To run the development app:
+
+```bash
 ./run_applyrx.sh
 ```
 
-Play a song in Apple Music, open the built-in lyrics panel once, and Applyrx
-will pick up the TTML cache and start rendering synchronized lyrics.
+The app appears as a menu bar item and a desktop lyrics overlay. Play a track
+in Music.app; the app reads its metadata and searches only the local Apple Music
+cache for a strictly matching lyric response.
 
-## Build as an App Bundle
+## Build
+
+Build a macOS app bundle with:
 
 ```bash
 ./scripts/build_app.sh
 open dist/Applyrx.app
 ```
 
-The build compiles `native/ApplyrxLyricsPanel.swift` and embeds the native panel
-in the app bundle.
-Python 3.10 or newer is required. The scripts select a compatible installed
-`python3`/`python3.10`–`python3.13`, or accept `APPLYRX_PYTHON=/path/to/python`.
-If none is available, they stop without modifying system Python.
-Manual macOS hotkey and playback acceptance steps are documented in
-[`docs/ACCEPTANCE_MACOS.md`](./docs/ACCEPTANCE_MACOS.md).
+The build compiles `native/ApplyrxLyricsPanel.swift` and packages the app under
+`dist/Applyrx.app`. The build scripts use an installed compatible Python
+interpreter and do not modify system Python. Set `APPLYRX_PYTHON` to select a
+specific interpreter when needed.
 
-The bundle currently expects to run from the project directory and uses the
-local `venv`. A fully standalone, notarized distributable is planned; see
-[`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md).
+## Usage
 
-## CLI
+1. Start Applyrx and allow its macOS Automation request to read Music.app.
+2. Play a song in Apple Music.
+3. If lyrics are not found yet, open that song's built-in lyrics view in Music
+   and give the local cache time to update. Applyrx retries local lookup for the
+   current track.
+4. Use the menu bar controls to show or hide the panel and configure its
+   appearance.
 
-Applyrx ships a scriptable CLI that reuses the exact same matching logic as
-the GUI.
+Lyrics may remain unavailable if the data is not cached, a different song
+version is cached, metadata is incomplete/conflicting, or strict matching
+cannot establish that the cached lyrics belong to the current track.
 
-```bash
-# Print full current state as JSON
-./venv/bin/python applyrx_cli.py state
+## Keyboard Shortcuts
 
-# Print only the current lyric line
-./venv/bin/python applyrx_cli.py current-line
+| Shortcut | Action |
+| --- | --- |
+| `Control-Option-Command-L` | Show or hide the desktop lyrics overlay |
+| `Control-Option-Command-M` | Temporarily enable drag mode; click-through is restored automatically |
 
-# Dump current song lyrics as LRC
-./venv/bin/python applyrx_cli.py lyrics --format lrc
+## Architecture
 
-# Stream lyric changes as JSON Lines
-./venv/bin/python applyrx_cli.py watch
-
-# Apply a global offset in seconds (positive = earlier)
-./venv/bin/python applyrx_cli.py --offset 1.2 watch
+```text
+Apple Music.app
+      │ read current track metadata and playback position
+      ▼
+CurrentTrackManager ──▶ AppleMusicCacheProvider
+                              │ read-only
+                              ▼
+                 Cache.db + fsCachedData
+                              │
+                 catalog/song cache response
+                              │ strict identity and metadata matching
+                              ▼
+             syllable-lyrics TTML ──▶ TTMLParser
+                                           │ timed lines / available word timing
+                                           ▼
+                                     LyricsEngine
+                                           │
+                             Python panel bridge (JSON over stdin)
+                                           ▼
+                                SwiftUI desktop overlay
 ```
 
-The `watch` subcommand works well with Raycast, Alfred, BTT, tmux status
-lines, and Stream Deck integrations.
+The overlay uses Music's reported playback position as its synchronization
+reference. Lyrics are sourced from cached catalog/song responses containing
+Apple Music's `syllable-lyrics` extension; Applyrx does not ask a third-party
+lyrics service to identify or provide lyrics.
 
-## Configuration
+## Limitations
 
-Applyrx stores its config at:
+- Apple Music does not provide ordinary third-party developers with a public,
+  general-purpose interface to its complete timed lyric catalog. This project
+  depends on Apple Music's local cache format, an implementation detail that
+  can change with Apple Music or macOS updates.
+- A lyric response must already be present in the local cache. Not every track,
+  storefront, or song version will be available.
+- Strict matching intentionally refuses to display lyrics when identity or
+  metadata is insufficient, incomplete, or conflicting.
+- Word timing is retained when present, but the panel does not currently
+  highlight individual words.
+- This is a macOS/Apple Music project; other players and operating systems are
+  not supported.
+- The release app is not notarized.
 
-```
-~/.applyrx/config.json
-```
+## Privacy
 
-| Field | Description |
-|---|---|
-| `offset` | Lyric timing offset in seconds |
-| `desktop_visible` | Show or hide the floating desktop lyric |
-| `desktop_click_through` | Let mouse clicks pass through the desktop lyric |
-| `menubar_lyrics_visible` | Show the current lyric in the menu bar |
-| `font_size_current` | Font size of the main desktop lyric line |
-| `panel_width` / `panel_height` | Size of the desktop lyric panel |
-| `background_visible` | Show or hide the desktop lyric background |
+- The desktop lyrics provider reads Apple Music's `Cache.db` in read-only mode
+  and reads associated `fsCachedData` response bodies. It does not modify the
+  Apple Music cache.
+- Applyrx reads current track metadata and playback position from Music.app. It
+  does not issue playback controls.
+- Applyrx does not read an Apple ID password or authentication credentials.
+- The desktop lyrics lookup does not upload track information or lyric content
+  to third-party lyrics services.
+- The app writes its own preferences under `~/.applyrx`; it does not store
+  Apple Music credentials there.
 
-Most of these can be changed from the menu bar without editing JSON.
+## Troubleshooting
 
-## Project Layout
+**The overlay says no matching lyrics.** Confirm Music.app is playing the
+intended track, then open that track's built-in lyrics view so Music can
+populate its local cache. Applyrx will retry. It will continue to refuse a
+candidate if strict identity checks cannot establish a safe match.
 
-```
-applyrx/
-├── apple_music_ttml.py      # NSURLCache reader, request replay, TTML parser
-├── main.py                  # Strict matching pipeline (adam_id + metadata)
-├── applyrx_ui.py     # Desktop overlay + menu bar GUI
-├── applyrx_cli.py           # Scriptable CLI
-├── applyrx_state.py         # Shared runtime state
-├── lyrics_state.py          # Lyric progression / current-line tracking
-├── scripts/                 # bootstrap.sh, build_app.sh
-├── run_applyrx.sh        # GUI entry point
-└── dist/Applyrx.app         # Local app bundle
-```
+**The app cannot read the current track.** Check macOS Privacy & Security →
+Automation and allow Applyrx to access Music.app. Restart Applyrx after changing
+the permission.
 
-## Design Principles
+**The panel does not appear.** Check the Applyrx menu bar item and toggle
+desktop lyrics with `Control-Option-Command-L`. Confirm macOS permits the
+application to run.
 
-1. **Never display wrong lyrics.** A clear error beats a confident mismatch.
-2. **Apple is the source of truth.** No third-party providers in the default
-   path.
-3. **Reuse, don't re-sign.** Applyrx never attempts to reproduce Apple's
-   request signing; it replays what Music.app has already signed.
-4. **Scriptable by default.** Every piece of state the GUI shows is also
-   available through the CLI as JSON.
-5. **Offline after first play.** Once a song's TTML is cached, Applyrx works
-   without any network round-trips.
-
-## FAQ
-
-**Does Applyrx need my Apple ID or any API key?**
-No. It only reads the local Apple Music cache and replays already-signed
-requests.
-
-**Does Applyrx modify anything in Apple Music?**
-No. It opens a read-only copy of the cache database and never writes to
-Music.app's state.
-
-**Why does my song show "no matching lyrics"?**
-Open the lyrics panel for that song once in Apple Music so the TTML cache is
-populated, then Applyrx will pick it up automatically.
-
-**Can I use this on Spotify / YouTube Music / NetEase?**
-Not by design. Applyrx is intentionally Apple Music-only and Apple-TTML-only.
-
-**How is matching made reliable across storefronts?**
-Applyrx resolves the Apple catalog id via `itunes.apple.com/lookup`, iterating
-through CN, TW, and US storefronts, then compares title, artist, and duration
-against the player state. Traditional and simplified Chinese titles are
-normalized before comparison.
+**The overlay cannot be moved.** Use `Control-Option-Command-M` to enter
+temporary drag mode. Click-through is restored automatically after the drag
+window.
 
 ## Roadmap
 
-- Standalone notarized `.app` bundle
-- Homebrew cask
-- Optional word-level (karaoke) rendering where Apple provides it
-- Native Swift menu bar host for lower idle CPU
-
-## Related Projects
-
-These projects share a similar goal and are worth knowing:
-
-- [LyricsX](https://github.com/ddddxxx/LyricsX) — the original macOS desktop
-  lyrics app, written in Swift, supports multiple music players and lyric
-  providers.
-- [sptlrx](https://github.com/raitonoberu/sptlrx) — terminal lyrics viewer
-  for Spotify with a beautiful TUI.
-- [LyricFever](https://www.lyricfever.com/) — macOS lyrics menubar app with
-  Apple Music support.
+- Improve release distribution and signing/notarization.
+- Improve cache compatibility diagnostics while preserving strict matching.
+- Explore word-level visual highlighting when supported by reliable timing data.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please keep the strict-matching
-invariant: any change that can cause Applyrx to display lyrics from a
-different song than the one currently playing will be rejected.
-
-For questions, bug reports, or ideas, please open a GitHub Issue/PR or reach
-out on X: [@LuJia32473](https://x.com/LuJia32473).
+Issues and pull requests are welcome. Please avoid including Apple Music cache
+files, personal configuration, credentials, or logs containing private data in
+bug reports. Changes must preserve read-only cache access, local lyric lookup,
+and strict track matching.
 
 ## License
 
-[MIT](./LICENSE)
+Applyrx is distributed under the MIT License. See [LICENSE](./LICENSE) for the
+original copyright and license text.
+
+## Disclaimer
+
+Applyrx is an unofficial third-party project. Apple Music, Apple, and macOS are
+trademarks of Apple Inc. This project is not affiliated with or endorsed by
+Apple. Compatibility with Apple Music and macOS is not guaranteed and may
+change as those products evolve.

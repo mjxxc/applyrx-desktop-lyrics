@@ -1,20 +1,11 @@
 # Applyrx
 
-<p align="center">
-  <a href="./README.md">English</a> ·
-  <a href="./README.zh-CN.md">简体中文</a>
-</p>
+Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它从 Apple
+Music 本地缓存读取带时间戳的歌词，并通过同步桌面浮窗及菜单栏显示。
 
-<p align="center">
-  <strong>macOS 上帧级对齐的 Apple Music 原生歌词。</strong><br>
-  桌面悬浮歌词 · 菜单栏歌词 · 完整歌词窗口 · CLI
-</p>
-
----
-
-Applyrx 是一款 macOS 上的 Apple Music 实时歌词应用，体验设计受 [LyricsX](https://github.com/ddddxxx/LyricsX) 启发。Applyrx 不向任何第三方歌词站发请求，而是直接从本地 `NSURLCache` 里读取 Apple Music 自己签发的 TTML 歌词响应——你在 Applyrx 里看到的每一个字，和 Apple Music 应用内歌词面板**字节级一致**，包括官方翻译、罗马音，以及 Apple 提供了逐字时间戳时的逐字歌词。
-
-Applyrx 从不猜歌词。如果当前播放的歌曲不能通过 Apple 专辑 id、歌名、艺术家和时长明确匹配到某条缓存 TTML，Applyrx 会显示明确的错误提示，而不是展示另一首歌的歌词。
+本项目基于并受 MIT 许可的
+[Applyrx](https://github.com/rakei076/applyrx) 项目启发，是独立的非官方第三方
+工具，与 Apple 无关联，也未获得 Apple 的认可或赞助。
 
 ## 演示
 
@@ -22,175 +13,159 @@ Applyrx 从不猜歌词。如果当前播放的歌曲不能通过 Apple 专辑 i
 
 [下载无声 MP4 演示视频](./assets/applyrx-demo.mp4)。
 
-## 工作原理
-
-```
-Apple Music.app ──播放──▶ 向 /ttmlLyrics 发已签名请求 ──▶ NSURLCache (Cache.db)
-                                                                    │
-                                                                    ▼
-                                        ┌───────────────────────────────────┐
-                                        │ Applyrx                           │
-                                        │                                   │
-    AppleScript（读播放状态） ─────────▶│  1. 读取当前曲目元数据             │
-                                        │  2. iTunes Lookup 解析 adam_id    │
-                                        │  3. 在缓存中定位匹配的 TTML 条目  │
-                                        │  4. 用相同的头复放请求（curl）    │
-                                        │  5. 解析 TTML → 带时间戳的歌词行  │
-                                        │  6. 渲染 UI / 发出 CLI 事件       │
-                                        └───────────────────────────────────┘
-                                                         │
-                         ┌───────────────────────────────┼───────────────────────────────┐
-                         ▼                               ▼                               ▼
-                桌面悬浮歌词                        菜单栏歌词                          CLI
-```
-
-不依赖任何 private entitlement，不借助 Accessibility hack，也不尝试重新实现 Apple 的请求签名。Applyrx 只是复用 Music.app 已经签好并缓存下来的请求，用相同的 URL 和请求头再发一次。
-
 ## 功能
 
-- **Apple Music 原生歌词**：直接读取本地 TTML 缓存，和应用内歌词面板同源。
-- **桌面悬浮歌词**：SwiftUI + AppKit `NSPanel`，底部居中、置顶且不抢焦点；默认全窗点击穿透，歌词行由实时同步引擎提供。按 `⌃⌥⌘L` 显示/隐藏，按 `⌃⌥⌘M` 临时进入 10 秒拖动模式，之后自动恢复点击穿透。
-- **菜单栏歌词**：显示当前句歌词，可一键关闭。
-- **完整歌词窗口**：当前行高亮，平滑滚动。
-- **CLI**（`applyrx_cli.py`）：提供 `state`、`current-line`、`lyrics`、`watch` 四个子命令，输出对脚本友好的 JSON。
-- **严格匹配策略**：要求 catalog id + 歌名 + 艺术家 + 时长四项一致。繁简中文自动归一化，时长唯一命中时作为兜底条件。
-- **多区查询**（CN/TW/US），确保 Apple Music 中国区的 catalog id 能被解析。
-- **首次播放后可离线**：一首歌的 TTML 进 Apple Music 缓存后，之后 Applyrx 完全不需要网络。
-- **本地 JSON 配置**：`~/.applyrx/config.json`，大部分字段可在菜单栏直接调整。
+- 在桌面浮窗显示与 Apple Music 同步的歌词。
+- 菜单栏集成和原生 SwiftUI 歌词面板。
+- 从 Apple Music 本地 `Cache.db` 和 `fsCachedData` 读取歌曲目录响应及
+  `syllable-lyrics` TTML。
+- 将 TTML 解析为带时间戳的歌词行；Apple 提供逐字时间时会保留该数据。当前面板
+  显示同步歌词行，不提供卡拉 OK 式逐字高亮。
+- 严格匹配当前歌曲；不根据不完整或冲突的元数据猜测。
+- 当前歌曲首次未匹配时，会重试本地缓存查询。
+- 跟随 Music 播放位置，支持暂停、继续和 seek 定位。
+- 默认点击穿透的浮窗，以及临时拖动模式；拖动模式会自动恢复点击穿透。
+- 全局快捷键：`Control-Option-Command-L` 显示/隐藏桌面歌词；
+  `Control-Option-Command-M` 临时启用拖动模式。
 
 ## 环境要求
 
-- macOS，安装了 Apple Music.app
-- Python 3.11 或更新版本
-- 当前歌曲至少在 Apple Music 里打开过一次歌词面板，这样 TTML 才会进缓存
-- macOS 首次运行时会请求"允许控制 Music.app"的自动化权限
+- 安装 Apple Music.app 的 macOS。
+- 开发和构建需要 Python 3.10 或更新版本；v0.1.0 Release 使用 Python 3.12
+  构建。
+- Apple Music 本地缓存中必须已有该歌曲的歌词。必要时可在 Music 中打开内建歌词
+  面板以产生本地缓存。
+- macOS 自动化权限，以便读取 Music.app 当前曲目信息。
 
-## 快速开始
+## 安装
+
+克隆仓库，并在项目专用虚拟环境中安装依赖：
 
 ```bash
-git clone https://github.com/rakei076/applyrx.git
-cd applyrx
+git clone https://github.com/<owner>/applyrx-desktop-lyrics.git
+cd applyrx-desktop-lyrics
 ./scripts/bootstrap.sh
+```
+
+启动开发版：
+
+```bash
 ./run_applyrx.sh
 ```
 
-在 Apple Music 里播放一首歌、打开一次自带歌词面板，Applyrx 就会从 TTML 缓存中读取并开始显示同步歌词。
+应用会显示菜单栏图标和桌面歌词浮窗。播放歌曲后，应用读取当前曲目元数据，并且
+只在 Apple Music 本地缓存中查找严格匹配的歌词响应。
 
-## 打包成 App
+## 构建
+
+构建 macOS App：
 
 ```bash
 ./scripts/build_app.sh
 open dist/Applyrx.app
 ```
 
-构建会先编译 `native/ApplyrxLyricsPanel.swift`，再将原生面板嵌入 `.app`。快捷键为 `⌃⌥⌘L`（显示/隐藏）和 `⌃⌥⌘M`（临时拖动 10 秒）。当前 bundle 属于本地开发版，运行时依赖项目目录下的 `venv` 和源码辅助文件。完整独立、已公证的发行包见 [`RELEASE_CHECKLIST.md`](./RELEASE_CHECKLIST.md)。
+构建流程会编译 `native/ApplyrxLyricsPanel.swift`，并将程序打包到
+`dist/Applyrx.app`。脚本会使用本机已安装的兼容 Python，不会修改系统 Python。
+必要时可通过 `APPLYRX_PYTHON` 指定解释器。
 
-构建要求 Python 3.10 或更新版本；脚本会优先选用兼容的 `python3`，否则查找本机 `python3.13` 至 `python3.10`。可用 `APPLYRX_PYTHON=/path/to/python3.12` 指定解释器。没有兼容解释器时脚本会停止并给出安装建议，不会修改系统 Python。快捷键和 Music 播放同步的手动验收步骤见 [`docs/ACCEPTANCE_MACOS.md`](./docs/ACCEPTANCE_MACOS.md)。
+## 使用
 
-## CLI
+1. 启动 Applyrx，并允许 macOS 自动化权限请求读取 Music.app。
+2. 在 Apple Music 中播放歌曲。
+3. 如果暂时没有歌词，可在 Music 中打开该歌曲的内建歌词面板，并等待本地缓存更新。
+   Applyrx 会对当前歌曲重试本地查询。
+4. 使用菜单栏控制面板显示状态及外观。
 
-Applyrx 自带一个脚本友好的 CLI，复用和 GUI 完全相同的匹配逻辑。
+如果歌曲歌词尚未进入本地缓存、缓存的是不同版本、元数据不完整/冲突，或严格匹配
+无法确认歌词归属，歌词可能不会显示。
 
-```bash
-# 输出完整当前状态（JSON）
-./venv/bin/python applyrx_cli.py state
+## 快捷键
 
-# 只输出当前这一句歌词
-./venv/bin/python applyrx_cli.py current-line
+| 快捷键 | 操作 |
+| --- | --- |
+| `Control-Option-Command-L` | 显示或隐藏桌面歌词浮窗 |
+| `Control-Option-Command-M` | 临时启用拖动模式；之后自动恢复点击穿透 |
 
-# 把当前歌曲的歌词导出成 LRC
-./venv/bin/python applyrx_cli.py lyrics --format lrc
+## 架构
 
-# 持续监听歌词变化，输出 JSON Lines
-./venv/bin/python applyrx_cli.py watch
-
-# 全局时间偏移（正数表示提前）
-./venv/bin/python applyrx_cli.py --offset 1.2 watch
+```text
+Apple Music.app
+      │ 只读当前歌曲元数据和播放位置
+      ▼
+CurrentTrackManager ──▶ AppleMusicCacheProvider
+                              │ 只读
+                              ▼
+                 Cache.db + fsCachedData
+                              │
+                         歌曲目录缓存响应
+                              │ 严格身份及元数据匹配
+                              ▼
+             syllable-lyrics TTML ──▶ TTMLParser
+                                           │ 定时歌词行 / 可用的逐字时间
+                                           ▼
+                                     LyricsEngine
+                                           │
+                             Python 面板桥接（stdin 上的 JSON）
+                                           ▼
+                                SwiftUI 桌面浮窗
 ```
 
-`watch` 子命令适合接到 Raycast、Alfred、BTT、tmux 状态栏、Stream Deck 等工具里。
+浮窗以 Music 报告的播放位置作为同步参考。歌词来自本地缓存中带有 Apple Music
+`syllable-lyrics` 扩展的歌曲目录响应；Applyrx 不会向第三方歌词服务请求歌曲识别
+或歌词内容。
 
-## 配置
+## 限制
 
-Applyrx 的配置文件位于：
+- Apple Music 没有向普通第三方开发者公开提供完整定时歌词的通用接口。本项目依赖
+  Apple Music 本地缓存格式这一实现细节；Apple Music 或 macOS 更新可能改变格式并
+  导致兼容性问题。
+- 歌词响应必须已存在于本地缓存中。并非所有歌曲、地区或版本都一定可用。
+- 为避免显示错误歌词，当歌曲身份或元数据不足、不完整或冲突时，严格匹配会拒绝显示。
+- 若缓存包含逐字时间，解析器会保留；当前面板尚未逐字高亮。
+- 本项目仅面向 macOS 和 Apple Music，不支持其他播放器或操作系统。
+- 当前 Release App 未经过公证。
 
-```
-~/.applyrx/config.json
-```
+## 隐私
 
-| 字段 | 说明 |
-|---|---|
-| `offset` | 歌词时间偏移秒数 |
-| `desktop_visible` | 显示/隐藏桌面悬浮歌词 |
-| `desktop_click_through` | 桌面悬浮歌词是否点击穿透 |
-| `menubar_lyrics_visible` | 菜单栏是否显示当前歌词 |
-| `font_size_current` | 桌面主歌词行字号 |
-| `panel_width` / `panel_height` | 桌面歌词面板宽高 |
-| `background_visible` | 显示/隐藏桌面歌词背景 |
+- 桌面歌词 Provider 以只读方式访问 Apple Music 的 `Cache.db` 及关联的
+  `fsCachedData` 响应内容，不修改 Apple Music 缓存。
+- Applyrx 从 Music.app 读取当前曲目元数据和播放位置，不发送播放控制命令。
+- Applyrx 不读取 Apple ID 密码或认证凭据。
+- 桌面歌词查询不会将曲目信息或歌词内容上传到第三方歌词服务。
+- 应用偏好设置保存在 `~/.applyrx`；不会在该目录保存 Apple Music 凭据。
 
-大部分字段都能在菜单栏面板里直接修改，不需要手动改 JSON。
+## 故障排查
 
-## 项目结构
+**浮窗显示没有匹配歌词。** 确认 Music.app 正在播放目标歌曲，然后在 Music 中打开该
+歌曲的内建歌词面板，使本地缓存有机会更新。Applyrx 会重试；如果严格身份校验无法
+确认候选属于当前歌曲，仍会拒绝显示。
 
-```
-applyrx/
-├── apple_music_ttml.py      # NSURLCache 读取、请求复放、TTML 解析
-├── main.py                  # 严格匹配主流程（adam_id + 元数据）
-├── applyrx_ui.py     # 桌面悬浮歌词 + 菜单栏 GUI
-├── applyrx_cli.py           # 命令行工具
-├── applyrx_state.py         # 共享运行时状态
-├── lyrics_state.py          # 歌词进度 / 当前行跟踪
-├── scripts/                 # bootstrap.sh、build_app.sh
-├── run_applyrx.sh        # GUI 启动入口
-└── dist/Applyrx.app         # 本地 App bundle
-```
+**应用无法读取当前歌曲。** 在“系统设置 → 隐私与安全性 → 自动化”中检查并允许
+Applyrx 访问 Music.app。更改权限后重启 Applyrx。
 
-## 设计原则
+**没有看到歌词面板。** 检查菜单栏中的 Applyrx 控件，并按
+`Control-Option-Command-L` 切换桌面歌词。确认 macOS 允许应用运行。
 
-1. **绝不显示错的歌词**。明确报错永远优于自信地串歌。
-2. **以 Apple 为唯一真实源**。默认路径不接入任何第三方歌词站。
-3. **复用而不是重签**。Applyrx 从不尝试重新实现 Apple 的请求签名，只复放 Music.app 已经签好的请求。
-4. **天然脚本友好**。GUI 显示的每一项状态，CLI 都能以 JSON 形式输出。
-5. **首次播放后可离线**。一首歌的 TTML 进缓存后，之后完全不需要网络。
-
-## 常见问题
-
-**Applyrx 需要我的 Apple ID 或 API Key 吗？**
-不需要。它只读本地 Apple Music 缓存，并复放已经签过名的请求。
-
-**Applyrx 会修改 Apple Music 的任何数据吗？**
-不会。它只在一个临时目录里开一份只读的缓存副本，不写 Music.app 的任何状态。
-
-**为什么某首歌提示"找不到匹配的歌词"？**
-请先在 Apple Music 里打开那首歌的歌词面板一次，让 TTML 进入缓存，Applyrx 就会自动识别。
-
-**能不能用在 Spotify / YouTube Music / 网易云音乐？**
-设计上不行。Applyrx 有意只支持 Apple Music，只用 Apple 的 TTML。
-
-**跨区怎么保证匹配可靠？**
-Applyrx 通过 `itunes.apple.com/lookup` 依次在 CN、TW、US 三个区解析 Apple 的 catalog id，然后把歌名、艺术家、时长和播放器状态对比。繁体中文和简体中文的歌名会被先归一化再比对。
+**无法移动浮窗。** 按 `Control-Option-Command-M` 进入临时拖动模式；拖动时限结束后
+会自动恢复点击穿透。
 
 ## 路线图
 
-- 独立、可公证、可分发的 `.app` bundle
-- Homebrew Cask 发布
-- Apple 提供时渲染逐字（卡拉 OK 风格）歌词
-- 用原生 Swift 重写菜单栏宿主以降低闲时 CPU
-
-## 相关项目
-
-同样致力于在 macOS 上显示同步歌词，值得了解：
-
-- [LyricsX](https://github.com/ddddxxx/LyricsX) — macOS 上最知名的桌面歌词应用，用 Swift 编写，支持多播放器和多歌词源。
-- [sptlrx](https://github.com/raitonoberu/sptlrx) — Spotify 终端歌词查看器，界面简洁漂亮。
-- [LyricFever](https://www.lyricfever.com/) — 支持 Apple Music 的 macOS 菜单栏歌词应用。
+- 改进发行包分发、签名和公证。
+- 在保持严格匹配的同时改进缓存兼容性诊断。
+- 在时间数据可靠时探索逐字视觉高亮。
 
 ## 贡献
 
-欢迎提 Issue 和 PR。请务必保持"严格匹配"这一核心约束：任何会导致 Applyrx 显示非当前播放歌曲歌词的改动都不会被合并。
-
-如果遇到问题、想反馈体验或讨论实现，欢迎在 GitHub 提 Issue/PR，也可以通过 X 联系：[@LuJia32473](https://x.com/LuJia32473)。
+欢迎提交 Issue 和 Pull Request。请勿在问题报告中附上 Apple Music 缓存文件、个人配置、
+凭据或包含隐私数据的日志。所有改动都应保持缓存只读、本地歌词查询和严格曲目匹配。
 
 ## 许可证
 
-[MIT](./LICENSE)
+Applyrx 使用 MIT License 发布。原始版权和许可文本见 [LICENSE](./LICENSE)。
+
+## 免责声明
+
+Applyrx 是非官方第三方项目。Apple Music、Apple 和 macOS 是 Apple Inc. 的商标。本
+项目与 Apple 无关联，也未获 Apple 认可。随着 Apple 产品演进，本项目不保证持续兼容。
