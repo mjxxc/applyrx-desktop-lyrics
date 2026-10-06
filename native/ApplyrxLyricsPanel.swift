@@ -14,6 +14,22 @@ private enum WordAppearance: Equatable {
     case upcoming
 }
 
+private enum LyricsAppearance {
+    static let panelWidth: CGFloat = 900
+    static let panelHeight: CGFloat = 252
+    static let cornerRadius: CGFloat = 22
+    static let horizontalPadding: CGFloat = 38
+    static let verticalPadding: CGFloat = 22
+    static let lineSpacing: CGFloat = 5
+    static let groupSpacing: CGFloat = 9
+    static let currentFontSize: CGFloat = 30
+    static let contextFontSize = currentFontSize * 0.66
+    static let contextOpacity = 0.62
+    static let completedWordOpacity = 0.88
+    static let upcomingWordOpacity = 0.46
+    static let currentLineTransitionDuration = 0.20
+}
+
 private struct CurrentLyric: Decodable {
     let text: String
     let startTime: Double?
@@ -79,8 +95,8 @@ private struct CurrentLyric: Decodable {
             return nil
         }
         var result = AttributedString(text)
-        result.foregroundColor = .white.opacity(0.42)
-        result.font = .system(size: 27, weight: .medium)
+        result.foregroundColor = .primary.opacity(LyricsAppearance.upcomingWordOpacity)
+        result.font = .system(size: LyricsAppearance.currentFontSize, weight: .medium)
         var searchStart = text.startIndex
 
         for (index, word) in words.enumerated() {
@@ -94,17 +110,20 @@ private struct CurrentLyric: Decodable {
             let weight: Font.Weight
             switch appearances[index] {
             case .completed:
-                color = .white.opacity(0.78)
+                color = .primary.opacity(LyricsAppearance.completedWordOpacity)
                 weight = .medium
             case .current:
-                color = Color(red: 0.62, green: 0.86, blue: 1.0)
+                color = .accentColor
                 weight = .bold
             case .upcoming:
-                color = .white.opacity(0.42)
+                color = .primary.opacity(LyricsAppearance.upcomingWordOpacity)
                 weight = .medium
             }
             result[attributedRange].foregroundColor = color
-            result[attributedRange].font = .system(size: 27, weight: weight)
+            result[attributedRange].font = .system(
+                size: LyricsAppearance.currentFontSize,
+                weight: weight
+            )
             searchStart = textRange.upperBound
         }
         return result
@@ -161,7 +180,8 @@ private struct TimedLyricText: View {
     var body: some View {
         renderedText
             .multilineTextAlignment(.center)
-            .lineLimit(3)
+            .lineLimit(nil)
+            .lineSpacing(LyricsAppearance.lineSpacing)
             .fixedSize(horizontal: false, vertical: true)
     }
 }
@@ -189,10 +209,10 @@ private struct LyricsPanelView: View {
     }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: LyricsAppearance.groupSpacing) {
             if isMatched {
-                if isMatched, let previous = model.message.previous {
-                    lyricText(previous, size: 16, opacity: 0.34)
+                if let previous = model.message.previous {
+                    contextLyric(previous)
                         .transition(.opacity)
                 }
 
@@ -207,46 +227,70 @@ private struct LyricsPanelView: View {
                         } else {
                             Text(current)
                                 .multilineTextAlignment(.center)
-                                .lineLimit(3)
+                                .lineLimit(nil)
+                                .lineSpacing(LyricsAppearance.lineSpacing)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
-                    .font(.system(size: 27, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .shadow(color: .black.opacity(0.38), radius: 7, y: 1)
-                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                    .font(.system(size: LyricsAppearance.currentFontSize, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .bottom).combined(with: .opacity),
+                        removal: .move(edge: .top).combined(with: .opacity)
+                    ))
+                    .id(current)
                 }
 
                 if let next = model.message.next {
-                    lyricText(next, size: 16, opacity: 0.46)
+                    contextLyric(next)
                         .transition(.opacity)
                 }
             } else {
                 Text(model.moveMode ? "拖动中" : statusText)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(model.moveMode ? .cyan : .white.opacity(0.82))
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(model.moveMode ? Color.accentColor : Color.secondary)
                     .lineLimit(1)
                     .transition(.opacity)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, 36)
-        .padding(.vertical, 18)
+        .padding(.horizontal, LyricsAppearance.horizontalPadding)
+        .padding(.vertical, LyricsAppearance.verticalPadding)
         .background {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.black.opacity(0.52))
+            RoundedRectangle(
+                cornerRadius: LyricsAppearance.cornerRadius,
+                style: .continuous
+            )
+            .fill(.ultraThinMaterial)
+            .overlay {
+                RoundedRectangle(
+                    cornerRadius: LyricsAppearance.cornerRadius,
+                    style: .continuous
+                )
+                .strokeBorder(.primary.opacity(0.08), lineWidth: 0.75)
+            }
+            .shadow(color: .black.opacity(0.10), radius: 14, y: 4)
         }
-        .frame(width: 900, height: 210)
+        .frame(
+            width: LyricsAppearance.panelWidth,
+            height: LyricsAppearance.panelHeight
+        )
         .contentShape(Rectangle())
         .allowsHitTesting(false)
-        .animation(.easeInOut(duration: 0.18), value: model.message.current)
+        .animation(
+            .easeInOut(duration: LyricsAppearance.currentLineTransitionDuration),
+            value: model.message.current
+        )
     }
 
-    private func lyricText(_ text: String, size: CGFloat, opacity: Double) -> some View {
+    private func contextLyric(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: size, weight: .regular))
-            .foregroundStyle(.white.opacity(opacity))
-            .lineLimit(1)
+            .font(.system(size: LyricsAppearance.contextFontSize, weight: .regular))
+            .foregroundStyle(.secondary.opacity(LyricsAppearance.contextOpacity))
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .lineSpacing(LyricsAppearance.lineSpacing)
+            .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity)
     }
 }
@@ -292,7 +336,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createPanel() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = NSSize(width: 900, height: 210)
+        let size = NSSize(
+            width: LyricsAppearance.panelWidth,
+            height: LyricsAppearance.panelHeight
+        )
         let frame = NSRect(
             x: screen.midX - size.width / 2,
             y: screen.minY + 54,
@@ -527,6 +574,14 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         return [
+            "contextTextIsSubordinate": LyricsAppearance.contextFontSize
+                / LyricsAppearance.currentFontSize >= 0.60
+                && LyricsAppearance.contextFontSize
+                / LyricsAppearance.currentFontSize <= 0.70,
+            "currentLineTransitionIsShort": LyricsAppearance.currentLineTransitionDuration
+                >= 0.15 && LyricsAppearance.currentLineTransitionDuration <= 0.25,
+            "panelLayoutSupportsWrap": LyricsAppearance.panelHeight >= 240
+                && LyricsAppearance.lineSpacing > 0,
             "wordTimingDecode": words?.words?.count == 4,
             "wordTimingPlayback": atPlayback == [.completed, .current, .upcoming, .upcoming],
             "wordTimingSeek": afterSeek == [.completed, .completed, .current, .upcoming],
