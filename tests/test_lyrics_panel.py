@@ -4,7 +4,7 @@ from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
-from lyrics_panel_bridge import find_panel_executable, presentation_state
+from lyrics_panel_bridge import find_panel_executable, panel_message, presentation_state
 from lyrics_provider import CurrentTrack, LyricLine, LyricWord, Lyrics
 from lyrics_sync import (
     CurrentTrackManager,
@@ -103,6 +103,33 @@ class PanelViewModelTests(unittest.TestCase):
                 {"startTime": 1, "endTime": 2, "text": " two"},
             ],
         }, payload["currentLyric"])
+
+    def test_projects_two_presentation_context_lines_without_relocating_current(self):
+        lyrics = Lyrics(
+            tuple(LyricLine(index, index + 1, f"line {index}") for index in range(5)),
+            "en",
+            False,
+            "100000001",
+        )
+        manager = CurrentTrackManager(ProviderStub(lyrics), executor=ImmediateExecutor())
+
+        payload = presentation_state(manager.update(make_snapshot(position=2.5)))
+
+        self.assertEqual("line 2", payload["current"])
+        self.assertEqual(["line 0", "line 1"], payload["previousLines"])
+        self.assertEqual(["line 3", "line 4"], payload["nextLines"])
+
+    def test_panel_message_carries_visibility_and_settings_commands(self):
+        state = CurrentTrackManager(
+            ProviderStub(None),
+            executor=ImmediateExecutor(),
+        ).update(make_snapshot())
+
+        payload = panel_message(state, panel_visible=False, open_settings=True)
+
+        self.assertFalse(payload["panelVisible"])
+        self.assertTrue(payload["openSettings"])
+        self.assertNotIn("panelVisible", panel_message(state))
 
     def test_missing_word_timing_keeps_plain_current_line(self):
         lyrics = Lyrics((LyricLine(0, 2, "plain line"),), "en", False, "100000001")

@@ -21,8 +21,10 @@ sponsored by Apple.
 - Menu bar integration and a native SwiftUI lyrics panel.
 - Reads catalog/song responses and `syllable-lyrics` TTML from the local Apple
   Music `Cache.db` and `fsCachedData` cache.
-- Parses TTML into timed lyric lines; retains word timing where Apple supplies
-  it. The panel displays synchronized lines, not karaoke-style word highlighting.
+- Parses TTML into timed lyric lines and highlights words when Apple supplies
+  word timing.
+- Native Settings window for lyric sizes, context opacity, displayed line count,
+  background opacity, and floating-panel position restoration.
 - Strict track matching: incomplete or conflicting metadata is not guessed.
 - Retries a local cache lookup after a track initially has no match.
 - Follows Music playback position, including pause, resume, and seeking.
@@ -82,7 +84,7 @@ specific interpreter when needed.
    and give the local cache time to update. Applyrx retries local lookup for the
    current track.
 4. Use the menu bar controls to show or hide the panel and configure its
-   appearance.
+   appearance. Choose **Settings…** for live lyric and window preferences.
 
 Lyrics may remain unavailable if the data is not cached, a different song
 version is cached, metadata is incomplete/conflicting, or strict matching
@@ -116,7 +118,7 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
                                            │
                              Python panel bridge (JSON over stdin)
                                            ▼
-                                SwiftUI desktop overlay
+                       SwiftUI desktop overlay + Settings
 ```
 
 The overlay uses Music's reported playback position as its synchronization
@@ -134,8 +136,8 @@ lyrics service to identify or provide lyrics.
   storefront, or song version will be available.
 - Strict matching intentionally refuses to display lyrics when identity or
   metadata is insufficient, incomplete, or conflicting.
-- Word timing is retained when present, but the panel does not currently
-  highlight individual words.
+- Word-level highlighting and additional context lines depend on the timing and
+  cached lyrics Apple Music supplies.
 - This is a macOS/Apple Music project; other players and operating systems are
   not supported.
 - The release app is not notarized.
@@ -150,8 +152,9 @@ lyrics service to identify or provide lyrics.
 - Applyrx does not read an Apple ID password or authentication credentials.
 - The desktop lyrics lookup does not upload track information or lyric content
   to third-party lyrics services.
-- The app writes its own preferences under `~/.applyrx`; it does not store
-  Apple Music credentials there.
+- Presentation preferences and an optional panel position are stored in the
+  macOS user defaults domain `com.applyrx.desktoplyrics`. Legacy app preferences
+  remain under `~/.applyrx`; neither location stores Apple Music credentials.
 
 ## Troubleshooting
 
@@ -176,7 +179,6 @@ window.
 
 - Improve release distribution and signing/notarization.
 - Improve cache compatibility diagnostics while preserving strict matching.
-- Explore word-level visual highlighting when supported by reliable timing data.
 
 ## Contributing
 

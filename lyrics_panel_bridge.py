@@ -59,6 +59,20 @@ def presentation_state(state: ManagerState) -> dict:
             "endTime": current_line.endTime,
             "words": words if valid_words else [],
         }
+    previous_lines = []
+    next_lines = []
+    if (
+        current_line is not None
+        and state.lyrics is not None
+        and position.currentIndex is not None
+    ):
+        lines = state.lyrics.lines
+        previous_lines = [
+            line.text for line in lines[max(0, position.currentIndex - 2):position.currentIndex]
+        ]
+        next_lines = [
+            line.text for line in lines[position.currentIndex + 1:position.currentIndex + 3]
+        ]
     return {
         "title": track.title if track else "",
         "artist": track.artist if track else "",
@@ -66,11 +80,26 @@ def presentation_state(state: ManagerState) -> dict:
         "playbackPosition": position.timestamp if math.isfinite(position.timestamp) else None,
         "matchStatus": state.matchStatus,
         "previous": position.previous.text if position.previous else None,
+        "previousLines": previous_lines,
         "current": current_line.text if current_line else None,
         "currentLyric": current_lyric,
         "next": position.next.text if position.next else None,
+        "nextLines": next_lines,
         "message": state.message,
     }
+
+
+def panel_message(
+    state: ManagerState,
+    *,
+    panel_visible: Optional[bool] = None,
+    open_settings: bool = False,
+) -> dict:
+    message = presentation_state(state)
+    if panel_visible is not None:
+        message["panelVisible"] = panel_visible
+    message["openSettings"] = open_settings
+    return message
 
 
 def find_panel_executable(explicit: Optional[Path] = None) -> Path:
@@ -112,20 +141,31 @@ class PanelBridge:
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
+        self._control_lock = threading.Lock()
+        self._panel_visible = True
+        self._panel_visibility_pending = True
+        self._open_settings = False
 
     @property
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def start(self) -> None:
+    def start(self, panel_visible: bool = True) -> None:
         if self.is_running:
             return
         if self.process is not None:
             self.stop()
         binary = find_panel_executable(self.executable)
         self.stop_event.clear()
+        with self._control_lock:
+            self._panel_visible = bool(panel_visible)
+            self._panel_visibility_pending = True
+            self._open_settings = False
+        arguments = [str(binary)]
+        if not panel_visible:
+            arguments.append("--initially-hidden")
         self.process = subprocess.Popen(
-            [str(binary)],
+            arguments,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -137,6 +177,17 @@ class PanelBridge:
             daemon=True,
         )
         self.thread.start()
+
+    def set_panel_visible(self, visible: bool) -> None:
+        with self._control_lock:
+            visible = bool(visible)
+            if self._panel_visible != visible:
+                self._panel_visible = visible
+                self._panel_visibility_pending = True
+
+    def request_settings(self) -> None:
+        with self._control_lock:
+            self._open_settings = True
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -167,9 +218,23 @@ class PanelBridge:
                 process = self.process
                 if process is None or process.poll() is not None or process.stdin is None:
                     return
+                with self._control_lock:
+                    desired_visibility = self._panel_visible
+                    visibility_pending = self._panel_visibility_pending
+                    panel_visible = desired_visibility if visibility_pending else None
+                    self._panel_visibility_pending = False
+                    open_settings = self._open_settings
+                    self._open_settings = False
+                if not desired_visibility and not open_settings and not visibility_pending:
+                    self.stop_event.wait(self.interval)
+                    continue
                 state = manager.update(watcher.poll())
                 payload = json.dumps(
-                    presentation_state(state),
+                    panel_message(
+                        state,
+                        panel_visible=panel_visible,
+                        open_settings=open_settings,
+                    ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8") + b"\n"

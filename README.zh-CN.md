@@ -19,8 +19,8 @@ Music 本地缓存读取带时间戳的歌词，并通过同步桌面浮窗及�
 - 菜单栏集成和原生 SwiftUI 歌词面板。
 - 从 Apple Music 本地 `Cache.db` 和 `fsCachedData` 读取歌曲目录响应及
   `syllable-lyrics` TTML。
-- 将 TTML 解析为带时间戳的歌词行；Apple 提供逐字时间时会保留该数据。当前面板
-  显示同步歌词行，不提供卡拉 OK 式逐字高亮。
+- 将 TTML 解析为带时间戳的歌词行；Apple 提供逐字时间时会逐字高亮。
+- 原生设置窗口可实时调整歌词字号、上下文透明度、显示行数、背景透明度及浮窗位置恢复。
 - 严格匹配当前歌曲；不根据不完整或冲突的元数据猜测。
 - 当前歌曲首次未匹配时，会重试本地缓存查询。
 - 跟随 Music 播放位置，支持暂停、继续和 seek 定位。
@@ -75,7 +75,7 @@ open dist/Applyrx.app
 2. 在 Apple Music 中播放歌曲。
 3. 如果暂时没有歌词，可在 Music 中打开该歌曲的内建歌词面板，并等待本地缓存更新。
    Applyrx 会对当前歌曲重试本地查询。
-4. 使用菜单栏控制面板显示状态及外观。
+4. 使用菜单栏控制面板显示状态；选择“Settings…”可实时调整歌词和窗口外观。
 
 如果歌曲歌词尚未进入本地缓存、缓存的是不同版本、元数据不完整/冲突，或严格匹配
 无法确认歌词归属，歌词可能不会显示。
@@ -108,7 +108,7 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
                                            │
                              Python 面板桥接（stdin 上的 JSON）
                                            ▼
-                                SwiftUI 桌面浮窗
+                         SwiftUI 桌面浮窗及设置窗口
 ```
 
 浮窗以 Music 报告的播放位置作为同步参考。歌词来自本地缓存中带有 Apple Music
@@ -122,7 +122,7 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
   导致兼容性问题。
 - 歌词响应必须已存在于本地缓存中。并非所有歌曲、地区或版本都一定可用。
 - 为避免显示错误歌词，当歌曲身份或元数据不足、不完整或冲突时，严格匹配会拒绝显示。
-- 若缓存包含逐字时间，解析器会保留；当前面板尚未逐字高亮。
+- 逐字高亮和额外上下文行取决于 Apple Music 提供的时间数据及缓存歌词。
 - 本项目仅面向 macOS 和 Apple Music，不支持其他播放器或操作系统。
 - 当前 Release App 未经过公证。
 
@@ -133,7 +133,9 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
 - Applyrx 从 Music.app 读取当前曲目元数据和播放位置，不发送播放控制命令。
 - Applyrx 不读取 Apple ID 密码或认证凭据。
 - 桌面歌词查询不会将曲目信息或歌词内容上传到第三方歌词服务。
-- 应用偏好设置保存在 `~/.applyrx`；不会在该目录保存 Apple Music 凭据。
+- 外观偏好和可选浮窗位置保存在 macOS 用户默认值域
+  `com.applyrx.desktoplyrics`。旧版应用偏好仍保存在 `~/.applyrx`；两处都不会保存
+  Apple Music 凭据。
 
 ## 故障排查
 
@@ -154,7 +156,6 @@ Applyrx 访问 Music.app。更改权限后重启 Applyrx。
 
 - 改进发行包分发、签名和公证。
 - 在保持严格匹配的同时改进缓存兼容性诊断。
-- 在时间数据可靠时探索逐字视觉高亮。
 
 ## 贡献
 
