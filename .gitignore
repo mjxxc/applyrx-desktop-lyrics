@@ -16,6 +16,10 @@ dist/
 *.log
 *.tmp
 
+# Release artifacts produced by scripts/release_macos.sh
+Applyrx-*.zip
+Applyrx-*.zip.sha256
+
 # Local runtime/config state
 .applyrx/
 config.json

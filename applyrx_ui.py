@@ -452,6 +452,7 @@ class AppDelegate(NSObject):
     timer = None
     status_item = None
     desktop_menu_item = None
+    settings_menu_item = None
     menubar_menu_item = None
     offset_menu_item = None
     font_size_menu_item = None
@@ -538,8 +539,17 @@ class AppDelegate(NSObject):
         self.status_item.button().setTitle_("applyrx")
         menu = NSMenu.alloc().init()
 
+        self.settings_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Settings…",
+            "openSettings:",
+            ",",
+        )
+        self.settings_menu_item.setTarget_(self)
+        menu.addItem_(self.settings_menu_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+
         self.desktop_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "隐藏桌面歌词" if bool(CONFIG["desktop_visible"]) else "显示桌面歌词",
+            "Hide Lyrics" if bool(CONFIG["desktop_visible"]) else "Show Lyrics",
             "toggleDesktopLyrics:",
             "",
         )
@@ -646,7 +656,7 @@ class AppDelegate(NSObject):
 
     def refreshMenu(self):
         if self.desktop_menu_item is not None:
-            self.desktop_menu_item.setTitle_("隐藏桌面歌词" if bool(CONFIG["desktop_visible"]) else "显示桌面歌词")
+            self.desktop_menu_item.setTitle_("Hide Lyrics" if bool(CONFIG["desktop_visible"]) else "Show Lyrics")
         if self.menubar_menu_item is not None:
             self.menubar_menu_item.setTitle_("隐藏菜单栏歌词" if bool(CONFIG["menubar_lyrics_visible"]) else "显示菜单栏歌词")
         if self.drag_menu_item is not None:
@@ -735,14 +745,27 @@ class AppDelegate(NSObject):
         CONFIG["desktop_visible"] = not bool(CONFIG["desktop_visible"])
         save_config()
         if bool(CONFIG["desktop_visible"]):
-            if not self._startNativePanel():
+            if self.native_panel_bridge is not None and self.native_panel_bridge.is_running:
+                self.native_panel_bridge.set_panel_visible(True)
+            elif not self._startNativePanel():
                 self.window.orderFrontRegardless()
         else:
-            if self.native_panel_bridge is not None:
+            if self.native_panel_bridge is not None and self.native_panel_bridge.is_running:
+                self.native_panel_bridge.set_panel_visible(False)
+            elif self.native_panel_bridge is not None:
                 self.native_panel_bridge.stop()
             if self.window is not None:
                 self.window.orderOut_(None)
         self.refreshMenu()
+
+    def openSettings_(self, sender):
+        if self.native_panel_bridge is None:
+            self.native_panel_bridge = PanelBridge()
+        if not self.native_panel_bridge.is_running:
+            self.native_panel_bridge.start(
+                panel_visible=bool(CONFIG["desktop_visible"])
+            )
+        self.native_panel_bridge.request_settings()
 
     def setDesktopClickThroughEnabled_(self, enabled):
         self.desktop_click_through = bool(enabled)

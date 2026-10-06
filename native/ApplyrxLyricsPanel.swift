@@ -2,21 +2,572 @@ import AppKit
 import Carbon
 import SwiftUI
 
+private struct TimedLyricWord: Decodable, Equatable {
+    let startTime: Double
+    let endTime: Double
+    let text: String
+}
+
+private enum WordAppearance: Equatable {
+    case completed
+    case current
+    case upcoming
+}
+
+private enum LyricsAppearance {
+    static let panelWidth: CGFloat = 900
+    static let minimumPanelHeight: CGFloat = 36
+    static let cornerRadius: CGFloat = 18
+    static let horizontalPadding: CGFloat = 28
+    static let verticalPadding: CGFloat = 6
+    static let lineSpacing: CGFloat = 2
+    static let groupSpacing: CGFloat = 2
+    static let defaultCurrentFontSize = 30.0
+    static let defaultContextFontSize = 20.0
+    static let defaultContextOpacity = 0.62
+    static let defaultDisplayLines = 2
+    static let defaultBackgroundOpacity = 1.0
+    static let defaultRememberWindowPosition = true
+    static let defaultRestoreWindowPosition = true
+    static let completedWordOpacity = 0.88
+    static let upcomingWordOpacity = 0.46
+    static let currentLineTransitionDuration = 0.24
+
+    /// Laid-out box of one single-line lyric row for the system font. A lyric row
+    /// renders its text at the font's own line height, which is taller than the
+    /// font size, so the panel must budget this box or the viewport clip cuts the
+    /// bottom of the last row's glyphs. Rounded up so the box never under-reports.
+    static func lyricLineHeight(fontSize: Double) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: CGFloat(fontSize))
+        return ceil(font.ascender - font.descender + font.leading)
+    }
+
+    @MainActor
+    static func panelHeight(for settings: LyricsAppearanceSettings) -> CGFloat {
+        panelHeight(
+            currentLyricSize: settings.currentLyricSize,
+            contextLyricSize: settings.contextLyricSize,
+            displayLines: settings.displayLines
+        )
+    }
+
+    static func panelHeight(
+        currentLyricSize: Double,
+        contextLyricSize: Double,
+        displayLines: Int
+    ) -> CGFloat {
+        let contextCount = CGFloat(max(0, displayLines - 1))
+        let lineCount = CGFloat(max(1, displayLines))
+        let contentHeight = lyricLineHeight(fontSize: currentLyricSize)
+            + contextCount * lyricLineHeight(fontSize: contextLyricSize)
+            + (lineCount - 1) * groupSpacing
+            + 2 * verticalPadding
+        return max(minimumPanelHeight, contentHeight)
+    }
+}
+
+@MainActor
+private final class LyricsAppearanceSettings: ObservableObject {
+    static let suiteName = "com.applyrx.desktoplyrics"
+    private static let displayLinesMigrationVersion = 2
+
+    private enum Key {
+        static let currentLyricSize = "lyrics.currentSize"
+        static let contextLyricSize = "lyrics.contextSize"
+        static let contextOpacity = "lyrics.contextOpacity"
+        static let displayLines = "lyrics.displayLines"
+        static let displayLinesMigrationVersion = "lyrics.displayLinesMigrationVersion"
+        static let backgroundOpacity = "window.backgroundOpacity"
+        static let rememberWindowPosition = "window.rememberPosition"
+        static let restoreWindowPosition = "window.restorePosition"
+        static let panelFrame = "window.panelFrame"
+    }
+
+    private let defaults: UserDefaults
+    var onAppearanceChange: (() -> Void)?
+    var onGlassIntensityChange: (() -> Void)?
+
+    @Published private(set) var currentLyricSize: Double
+    @Published private(set) var contextLyricSize: Double
+    @Published private(set) var contextOpacity: Double
+    @Published private(set) var displayLines: Int
+    @Published private(set) var backgroundOpacity: Double
+    @Published private(set) var rememberWindowPosition: Bool
+    @Published private(set) var restoreWindowPosition: Bool
+
+    init(defaults: UserDefaults? = nil) {
+        let store = defaults ?? UserDefaults(suiteName: Self.suiteName) ?? .standard
+        self.defaults = store
+        currentLyricSize = Self.storedDouble(
+            store, key: Key.currentLyricSize,
+            default: LyricsAppearance.defaultCurrentFontSize, range: 20...48
+        )
+        contextLyricSize = Self.storedDouble(
+            store, key: Key.contextLyricSize,
+            default: LyricsAppearance.defaultContextFontSize, range: 12...32
+        )
+        contextOpacity = Self.storedDouble(
+            store, key: Key.contextOpacity,
+            default: LyricsAppearance.defaultContextOpacity, range: 0.2...0.9
+        )
+        let storedLines = store.object(forKey: Key.displayLines) as? Int
+        let migrationVersion = store.integer(forKey: Key.displayLinesMigrationVersion)
+        let normalizedLines = Self.normalizedDisplayLines(
+            storedLines,
+            migrationVersion: migrationVersion
+        )
+        displayLines = normalizedLines
+        if storedLines != normalizedLines {
+            store.set(normalizedLines, forKey: Key.displayLines)
+        }
+        store.set(Self.displayLinesMigrationVersion, forKey: Key.displayLinesMigrationVersion)
+        backgroundOpacity = Self.storedDouble(
+            store, key: Key.backgroundOpacity,
+            default: LyricsAppearance.defaultBackgroundOpacity, range: 0...1
+        )
+        rememberWindowPosition = store.object(forKey: Key.rememberWindowPosition) as? Bool
+            ?? LyricsAppearance.defaultRememberWindowPosition
+        restoreWindowPosition = store.object(forKey: Key.restoreWindowPosition) as? Bool
+            ?? LyricsAppearance.defaultRestoreWindowPosition
+    }
+
+    private static func storedDouble(
+        _ defaults: UserDefaults,
+        key: String,
+        default fallback: Double,
+        range: ClosedRange<Double>
+    ) -> Double {
+        guard let number = defaults.object(forKey: key) as? NSNumber else {
+            return fallback
+        }
+        let value = number.doubleValue
+        return value.isFinite ? min(range.upperBound, max(range.lowerBound, value)) : fallback
+    }
+
+    private static func normalizedDisplayLines(
+        _ value: Int?,
+        migrationVersion: Int
+    ) -> Int {
+        guard migrationVersion >= displayLinesMigrationVersion else {
+            switch value {
+            case .some(1): return 1
+            case .some(3): return 2
+            case .some(5): return 3
+            default: return LyricsAppearance.defaultDisplayLines
+            }
+        }
+        switch value {
+        case .some(1): return 1
+        case .some(2): return 2
+        case .some(3): return 3
+        default: return LyricsAppearance.defaultDisplayLines
+        }
+    }
+
+    func setCurrentLyricSize(_ value: Double) {
+        currentLyricSize = min(48, max(20, value.isFinite ? value : LyricsAppearance.defaultCurrentFontSize))
+        defaults.set(currentLyricSize, forKey: Key.currentLyricSize)
+        onAppearanceChange?()
+    }
+
+    func setContextLyricSize(_ value: Double) {
+        contextLyricSize = min(32, max(12, value.isFinite ? value : LyricsAppearance.defaultContextFontSize))
+        defaults.set(contextLyricSize, forKey: Key.contextLyricSize)
+        onAppearanceChange?()
+    }
+
+    func setContextOpacity(_ value: Double) {
+        contextOpacity = min(0.9, max(0.2, value.isFinite ? value : LyricsAppearance.defaultContextOpacity))
+        defaults.set(contextOpacity, forKey: Key.contextOpacity)
+    }
+
+    func setDisplayLines(_ value: Int) {
+        displayLines = [1, 2, 3].contains(value) ? value : LyricsAppearance.defaultDisplayLines
+        defaults.set(displayLines, forKey: Key.displayLines)
+        onAppearanceChange?()
+    }
+
+    func setBackgroundOpacity(_ value: Double) {
+        backgroundOpacity = min(1, max(0, value.isFinite ? value : LyricsAppearance.defaultBackgroundOpacity))
+        defaults.set(backgroundOpacity, forKey: Key.backgroundOpacity)
+        onGlassIntensityChange?()
+    }
+
+    func setRememberWindowPosition(_ value: Bool) {
+        rememberWindowPosition = value
+        defaults.set(value, forKey: Key.rememberWindowPosition)
+    }
+
+    func setRestoreWindowPosition(_ value: Bool) {
+        restoreWindowPosition = value
+        defaults.set(value, forKey: Key.restoreWindowPosition)
+    }
+
+    func restoreDefaults() {
+        setCurrentLyricSize(LyricsAppearance.defaultCurrentFontSize)
+        setContextLyricSize(LyricsAppearance.defaultContextFontSize)
+        setContextOpacity(LyricsAppearance.defaultContextOpacity)
+        setDisplayLines(LyricsAppearance.defaultDisplayLines)
+        setBackgroundOpacity(LyricsAppearance.defaultBackgroundOpacity)
+        setRememberWindowPosition(LyricsAppearance.defaultRememberWindowPosition)
+        setRestoreWindowPosition(LyricsAppearance.defaultRestoreWindowPosition)
+    }
+
+    func savePanelFrame(_ frame: NSRect) {
+        guard rememberWindowPosition,
+              frame.origin.x.isFinite, frame.origin.y.isFinite,
+              frame.size.width.isFinite, frame.size.height.isFinite else {
+            return
+        }
+        defaults.set(
+            [frame.origin.x, frame.origin.y, frame.size.width, frame.size.height],
+            forKey: Key.panelFrame
+        )
+    }
+
+    func hasSavedPanelFrame() -> Bool {
+        defaults.object(forKey: Key.panelFrame) != nil
+    }
+
+    func restoredPanelFrame(
+        size: NSSize,
+        screens: [NSRect],
+        defaultFrame: NSRect
+    ) -> NSRect {
+        guard rememberWindowPosition, restoreWindowPosition,
+              let stored = defaults.array(forKey: Key.panelFrame) as? [NSNumber],
+              stored.count == 4 else {
+            return defaultFrame
+        }
+        let values = stored.map(\.doubleValue)
+        guard values.allSatisfy(\.isFinite),
+              values[2] > 100, values[3] > 80 else {
+            return defaultFrame
+        }
+        let saved = NSRect(x: values[0], y: values[1], width: size.width, height: size.height)
+        guard let screen = screens.max(by: {
+            saved.intersection($0).width * saved.intersection($0).height
+                < saved.intersection($1).width * saved.intersection($1).height
+        }) else {
+            return defaultFrame
+        }
+        let intersection = saved.intersection(screen)
+        guard !intersection.isNull, intersection.width >= 100, intersection.height >= 80 else {
+            return defaultFrame
+        }
+        let minX = screen.minX + 8
+        let minY = screen.minY + 8
+        let maxX = max(minX, screen.maxX - size.width - 8)
+        let maxY = max(minY, screen.maxY - size.height - 8)
+        let x = min(maxX, max(minX, saved.minX))
+        let y = min(maxY, max(minY, saved.minY))
+        return NSRect(origin: NSPoint(x: x, y: y), size: size)
+    }
+
+    static func defaultsSelfTest() -> [String: Bool] {
+        let suiteName = "com.applyrx.desktoplyrics.tests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let settings = LyricsAppearanceSettings(defaults: defaults)
+        let defaultsAreCorrect = settings.currentLyricSize == 30
+            && settings.contextLyricSize == 20
+            && settings.contextOpacity == 0.62
+            && settings.displayLines == 2
+            && settings.backgroundOpacity == 1
+            && settings.rememberWindowPosition
+            && settings.restoreWindowPosition
+
+        settings.setCurrentLyricSize(42)
+        settings.setContextLyricSize(28)
+        settings.setContextOpacity(0.4)
+        settings.setDisplayLines(3)
+        settings.setBackgroundOpacity(0.7)
+        settings.setRememberWindowPosition(false)
+        settings.setRestoreWindowPosition(false)
+        let persisted = defaults.double(forKey: Key.currentLyricSize) == 42
+            && defaults.double(forKey: Key.contextLyricSize) == 28
+            && defaults.double(forKey: Key.contextOpacity) == 0.4
+            && defaults.integer(forKey: Key.displayLines) == 3
+            && defaults.double(forKey: Key.backgroundOpacity) == 0.7
+            && defaults.bool(forKey: Key.rememberWindowPosition) == false
+            && defaults.bool(forKey: Key.restoreWindowPosition) == false
+        let secondInstance = LyricsAppearanceSettings(defaults: defaults)
+        let reloadWorks = secondInstance.currentLyricSize == 42
+            && secondInstance.contextLyricSize == 28
+            && secondInstance.contextOpacity == 0.4
+            && secondInstance.displayLines == 3
+            && secondInstance.backgroundOpacity == 0.7
+            && !secondInstance.rememberWindowPosition
+            && !secondInstance.restoreWindowPosition
+
+        let screen = NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let panelSize = NSSize(width: 900, height: 252)
+        let defaultFrame = NSRect(x: 270, y: 54, width: 900, height: 252)
+        let savedFrame = NSRect(x: 300, y: 240, width: 900, height: 252)
+        secondInstance.setRememberWindowPosition(true)
+        secondInstance.setRestoreWindowPosition(true)
+        secondInstance.savePanelFrame(savedFrame)
+        let saveWorks = secondInstance.hasSavedPanelFrame()
+        let restored = secondInstance.restoredPanelFrame(
+            size: panelSize, screens: [screen], defaultFrame: defaultFrame
+        )
+        let restoreWorks = restored.origin == savedFrame.origin
+        secondInstance.savePanelFrame(NSRect(x: 1300, y: 240, width: 900, height: 252))
+        let clampedFrame = secondInstance.restoredPanelFrame(
+            size: panelSize, screens: [screen], defaultFrame: defaultFrame
+        )
+        let resolutionChangeIsClamped = clampedFrame.maxX <= screen.maxX - 8
+        secondInstance.savePanelFrame(savedFrame)
+        secondInstance.restoreDefaults()
+        let resetPreservesPosition = secondInstance.restoredPanelFrame(
+            size: panelSize, screens: [screen], defaultFrame: defaultFrame
+        ).origin == savedFrame.origin
+        secondInstance.savePanelFrame(NSRect(x: 10000, y: 10000, width: 900, height: 252))
+        let invalidPositionFallsBack = secondInstance.restoredPanelFrame(
+            size: panelSize, screens: [screen], defaultFrame: defaultFrame
+        ) == defaultFrame
+        let resetWorks = secondInstance.currentLyricSize == 30
+            && secondInstance.contextLyricSize == 20
+            && secondInstance.contextOpacity == 0.62
+            && secondInstance.displayLines == 2
+            && secondInstance.backgroundOpacity == 1
+            && secondInstance.rememberWindowPosition
+            && secondInstance.restoreWindowPosition
+            && secondInstance.hasSavedPanelFrame()
+
+        let legacyMigrationWorks: Bool = {
+            @MainActor func migrated(
+                _ legacyValue: Int?,
+                migrationVersion: Int? = nil
+            ) -> (value: Int, storedValue: Int?, storedVersion: Int) {
+                let migrationSuite = "\(suiteName).migration.\(UUID().uuidString)"
+                let migrationDefaults = UserDefaults(suiteName: migrationSuite)!
+                defer { migrationDefaults.removePersistentDomain(forName: migrationSuite) }
+                if let legacyValue {
+                    migrationDefaults.set(legacyValue, forKey: Key.displayLines)
+                }
+                if let migrationVersion {
+                    migrationDefaults.set(
+                        migrationVersion,
+                        forKey: Key.displayLinesMigrationVersion
+                    )
+                }
+                let migratedSettings = LyricsAppearanceSettings(defaults: migrationDefaults)
+                return (
+                    migratedSettings.displayLines,
+                    migrationDefaults.object(forKey: Key.displayLines) as? Int,
+                    migrationDefaults.integer(forKey: Key.displayLinesMigrationVersion)
+                )
+            }
+            let five = migrated(5)
+            let three = migrated(3)
+            let one = migrated(1)
+            let missing = migrated(nil)
+            let previouslyMigratedThree = migrated(3, migrationVersion: 1)
+            return five.value == 3 && five.storedValue == 3
+                && three.value == 2 && three.storedValue == 2
+                && one.value == 1 && one.storedValue == 1
+                && missing.value == 2 && missing.storedValue == 2
+                && previouslyMigratedThree.value == 2
+                && previouslyMigratedThree.storedValue == 2
+                && [five, three, one, missing, previouslyMigratedThree]
+                    .allSatisfy { $0.storedVersion == Self.displayLinesMigrationVersion }
+        }()
+        return [
+            "settingsDefaults": defaultsAreCorrect,
+            "settingsCurrentSize": settings.currentLyricSize == 42,
+            "settingsContextSize": settings.contextLyricSize == 28,
+            "settingsContextOpacity": settings.contextOpacity == 0.4,
+            "settingsDisplayLines": settings.displayLines == 3,
+            "settingsBackgroundOpacity": settings.backgroundOpacity == 0.7,
+            "settingsPersistence": persisted,
+            "settingsNewInstanceReadsPersistence": reloadWorks,
+            "settingsRestoreDefaults": resetWorks,
+            "settingsRestoreDefaultsPreservesPosition": resetPreservesPosition,
+            "settingsSaveWindowPosition": saveWorks,
+            "settingsRestoreWindowPosition": restoreWorks,
+            "settingsResolutionChangeIsClamped": resolutionChangeIsClamped,
+            "settingsInvalidPositionFallsBack": invalidPositionFallsBack,
+            "settingsLegacyDisplayLineMigration": legacyMigrationWorks,
+            "settingsRejectsUnsupportedDisplayLineCount": {
+                settings.setDisplayLines(5)
+                return settings.displayLines == 2
+            }(),
+        ]
+    }
+}
+
+private struct CurrentLyric: Decodable {
+    let text: String
+    let startTime: Double?
+    let endTime: Double?
+    let words: [TimedLyricWord]?
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case startTime
+        case endTime
+        case words
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        startTime = try? container.decode(Double.self, forKey: .startTime)
+        endTime = try? container.decode(Double.self, forKey: .endTime)
+
+        guard let decodedWords = try? container.decode(
+            [TimedLyricWord].self,
+            forKey: .words
+        ), let startTime, let endTime,
+           startTime.isFinite, endTime.isFinite, endTime > startTime else {
+               words = nil
+               return
+        }
+        var previousStart = -Double.infinity
+        let timingsAreValid = decodedWords.allSatisfy { word in
+               let valid = word.startTime.isFinite
+                   && word.endTime.isFinite
+                   && word.startTime >= startTime
+                   && word.startTime >= previousStart
+                   && word.endTime <= endTime
+                   && word.endTime > word.startTime
+               previousStart = word.startTime
+               return valid
+        }
+        guard timingsAreValid else {
+               words = nil
+               return
+        }
+        words = decodedWords.isEmpty ? nil : decodedWords
+    }
+
+    func appearances(at position: Double?) -> [WordAppearance]? {
+        guard let words, let position, position.isFinite else {
+            return nil
+        }
+        let activeIndex = words.indices
+            .filter { words[$0].startTime <= position && position < words[$0].endTime }
+            .last
+        return words.indices.map { index in
+            if index == activeIndex {
+                return .current
+            }
+            return words[index].endTime <= position ? .completed : .upcoming
+        }
+    }
+
+    func styledText(
+        at position: Double?,
+        fontSize: Double
+    ) -> AttributedString? {
+        guard let words, let appearances = appearances(at: position) else {
+            return nil
+        }
+        var result = AttributedString(text)
+        result.foregroundColor = .primary.opacity(LyricsAppearance.upcomingWordOpacity)
+        result.font = .system(size: fontSize, weight: .medium)
+        var searchStart = text.startIndex
+
+        for (index, word) in words.enumerated() {
+            guard let textRange = text.range(
+                of: word.text,
+                range: searchStart..<text.endIndex
+            ), let attributedRange = Range(textRange, in: result) else {
+                return nil
+            }
+            let color: Color
+            let weight: Font.Weight
+            switch appearances[index] {
+            case .completed:
+                color = .primary.opacity(LyricsAppearance.completedWordOpacity)
+                weight = .medium
+            case .current:
+                color = .accentColor
+                weight = .bold
+            case .upcoming:
+                color = .primary.opacity(LyricsAppearance.upcomingWordOpacity)
+                weight = .medium
+            }
+            result[attributedRange].foregroundColor = color
+            result[attributedRange].font = .system(
+                size: fontSize,
+                weight: weight
+            )
+            searchStart = textRange.upperBound
+        }
+        return result
+    }
+}
+
 private struct PanelMessage: Decodable {
     var title: String
     var artist: String
     var playbackState: String
     var matchStatus: String
+    var playbackPosition: Double?
+    var lyricIndex: Int?
+    var seeked: Bool?
+    var trackChanged: Bool?
+    var currentLyric: CurrentLyric?
     var previous: String?
+    var previousLines: [String]?
     var current: String?
     var next: String?
+    var nextLines: [String]?
     var message: String?
+    var panelVisible: Bool?
+    var openSettings: Bool?
+
+    var selectedLyricIndex: Int { lyricIndex ?? -1 }
+
+    func lyricText(at index: Int) -> String? {
+        if index == selectedLyricIndex {
+            return current
+        }
+        if selectedLyricIndex == -1 {
+            let offset = index
+            return nextLines?.indices.contains(offset) == true
+                ? nextLines?[offset]
+                : (offset == 0 ? next : nil)
+        }
+        if index < selectedLyricIndex {
+            let distance = selectedLyricIndex - index
+            let lines = previousLines ?? []
+            guard distance > 0, distance <= lines.count else { return nil }
+            return lines[lines.count - distance]
+        }
+        let distance = index - selectedLyricIndex - 1
+        let lines = nextLines ?? []
+        guard distance >= 0, distance < lines.count else {
+            return distance == 0 ? next : nil
+        }
+        return lines[distance]
+    }
+
+    func contextLines(displayLines: Int) -> (previous: [String], next: [String]) {
+        let previousSource = previousLines ?? previous.map { [$0] } ?? []
+        let nextSource = nextLines ?? next.map { [$0] } ?? []
+        switch displayLines {
+        case 2:
+            return ([], Array(nextSource.prefix(1)))
+        case 3:
+            return (Array(previousSource.suffix(1)), Array(nextSource.prefix(1)))
+        default:
+            return ([], [])
+        }
+    }
 
     static let empty = PanelMessage(
         title: "",
         artist: "",
         playbackState: "unknown",
         matchStatus: "loading",
+        playbackPosition: nil,
+        lyricIndex: nil,
+        seeked: nil,
+        trackChanged: nil,
+        currentLyric: nil,
         previous: nil,
         current: nil,
         next: nil,
@@ -28,19 +579,105 @@ private struct PanelMessage: Decodable {
 private final class PanelModel: ObservableObject {
     @Published var message = PanelMessage.empty
     @Published var moveMode = false
+    @Published var animateLyricChange = false
 
-    func accept(_ data: Data) {
+    static func shouldAnimateLyricChange(
+        from oldIndex: Int?,
+        to newIndex: Int?,
+        seeked: Bool,
+        trackChanged: Bool
+    ) -> Bool {
+        guard !seeked, !trackChanged else { return false }
+        let oldValue = oldIndex ?? -1
+        let newValue = newIndex ?? -1
+        return oldValue != newValue && abs(newValue - oldValue) <= 1
+    }
+
+    func accept(_ data: Data) -> PanelMessage? {
         guard let message = try? JSONDecoder().decode(PanelMessage.self, from: data) else {
-            return
+            return nil
         }
+        let oldMessage = self.message
+        let trackChanged = message.trackChanged == true
+            || oldMessage.title != message.title
+            || oldMessage.artist != message.artist
+        animateLyricChange = Self.shouldAnimateLyricChange(
+            from: oldMessage.lyricIndex,
+            to: message.lyricIndex,
+            seeked: message.seeked == true,
+            trackChanged: trackChanged
+        )
         self.message = message
+        return message
+    }
+}
+
+private struct LyricRowHeightsKey: PreferenceKey {
+    static let defaultValue: [Int: CGFloat] = [:]
+
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
+}
+
+private struct TimedLyricText: View {
+    let lyric: CurrentLyric
+    let playbackPosition: Double?
+    let fontSize: Double
+
+    private var renderedText: Text {
+        Text(lyric.styledText(at: playbackPosition, fontSize: fontSize) ?? AttributedString(lyric.text))
+    }
+
+    var body: some View {
+        renderedText
+            .multilineTextAlignment(.center)
+            .lineLimit(nil)
+            .lineSpacing(LyricsAppearance.lineSpacing)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Visual emphasis of a lyric row: 1 = current lyric styling, 0 = context styling.
+///
+/// A line advance animates the emphasis together with the track offset, so the
+/// target row grows into the current styling while the track scrolls and reaches
+/// exactly the settled styling when the scroll ends: no post-scroll style jump.
+private enum LyricTransitionStyle {
+    static func emphasis(
+        forIndex index: Int,
+        activeIndex: Int,
+        incomingIndex: Int,
+        currentSlot: Int,
+        progress: CGFloat
+    ) -> CGFloat {
+        guard activeIndex != -2 else {
+            return index == incomingIndex ? 1 : 0
+        }
+        guard incomingIndex != activeIndex else {
+            return index == activeIndex ? 1 : 0
+        }
+        if index == activeIndex {
+            // The outgoing row keeps its styling while it leaves the track. In a
+            // three-line layout it stays visible and becomes context styling.
+            return currentSlot == 1 ? 1 - progress : 1
+        }
+        if index == incomingIndex {
+            return progress
+        }
+        return 0
     }
 }
 
 private struct LyricsPanelView: View {
     @ObservedObject var model: PanelModel
-
-    private var isMatched: Bool { model.message.matchStatus == "matched" }
+    @ObservedObject var settings: LyricsAppearanceSettings
+    @State private var anchorIndex = -2
+    @State private var activeIndex = -2
+    @State private var trackOffset: CGFloat = 0
+    @State private var styleProgress: CGFloat = 0
+    @State private var rowHeights: [Int: CGFloat] = [:]
+    @State private var isScrolling = false
 
     private var statusText: String {
         if model.message.title.isEmpty {
@@ -60,75 +697,306 @@ private struct LyricsPanelView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Text(model.message.title.isEmpty ? "Apple Music" : model.message.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                if !model.message.artist.isEmpty {
-                    Text("—")
-                        .foregroundStyle(.white.opacity(0.36))
-                    Text(model.message.artist)
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.70))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Text(model.moveMode ? "拖动中" : statusText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(model.moveMode ? .cyan : .white.opacity(0.55))
-                    .lineLimit(1)
-            }
+        let visibleCount = settings.displayLines
+        let firstRow = anchorIndex == -2 ? initialAnchorIndex : anchorIndex
+        let trackIndices = Array(firstRow...(firstRow + visibleCount))
+        let viewportHeight = max(
+            0,
+            LyricsAppearance.panelHeight(for: settings)
+                - 2 * LyricsAppearance.verticalPadding
+        )
 
-            VStack(spacing: 7) {
-                if isMatched, let previous = model.message.previous {
-                    Text(previous)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.34))
-                        .lineLimit(1)
-                        .transition(.opacity)
-                }
-
-                if isMatched, let current = model.message.current {
-                    Text(current)
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .shadow(color: .black.opacity(0.45), radius: 8, y: 1)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                } else {
-                    Text(statusText)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(1)
-                        .transition(.opacity)
-                }
-
-                if isMatched, let next = model.message.next {
-                    Text(next)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.48))
-                        .lineLimit(1)
-                        .transition(.opacity)
+        return ZStack(alignment: .top) {
+            VStack(spacing: LyricsAppearance.groupSpacing) {
+                ForEach(trackIndices, id: \.self) { index in
+                    lyricTrackRow(at: index)
+                        .id(index)
+                        .overlay {
+                            GeometryReader { geometry in
+                                Color.clear.preference(
+                                    key: LyricRowHeightsKey.self,
+                                    value: [index: geometry.size.height]
+                                )
+                            }
+                        }
                 }
             }
-            .frame(maxWidth: .infinity)
-            .animation(.easeInOut(duration: 0.28), value: model.message.current)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .offset(y: -trackOffset)
         }
-        .padding(.horizontal, 30)
-        .padding(.vertical, 18)
-        .background {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.black.opacity(0.54))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(.white.opacity(0.10), lineWidth: 1)
-                }
+        .frame(maxWidth: .infinity)
+        .frame(height: viewportHeight, alignment: .top)
+        .clipped()
+        .onPreferenceChange(LyricRowHeightsKey.self) { rowHeights = $0 }
+        .onAppear(perform: synchronizeToCurrentMessage)
+        .onChange(of: model.message.lyricIndex) { _, _ in
+            handleLyricIndexChange()
         }
-        .frame(width: 900, height: 174)
+        .onChange(of: settings.displayLines) { _, _ in
+            synchronizeToCurrentMessage()
+        }
+        .padding(.horizontal, LyricsAppearance.horizontalPadding)
+        .padding(.vertical, LyricsAppearance.verticalPadding)
+        .frame(
+            width: LyricsAppearance.panelWidth,
+            height: LyricsAppearance.panelHeight(for: settings)
+        )
         .contentShape(Rectangle())
         .allowsHitTesting(false)
+    }
+
+    private var initialAnchorIndex: Int {
+        let lyricIndex = model.message.selectedLyricIndex
+        guard lyricIndex >= 0 else { return -1 }
+        return settings.displayLines == 3 ? max(0, lyricIndex - 1) : lyricIndex
+    }
+
+    private var currentLyricSlot: Int {
+        settings.displayLines == 3 ? 1 : 0
+    }
+
+    private func emphasis(for index: Int) -> CGFloat {
+        LyricTransitionStyle.emphasis(
+            forIndex: index,
+            activeIndex: activeIndex,
+            incomingIndex: model.message.selectedLyricIndex,
+            currentSlot: currentLyricSlot,
+            progress: styleProgress
+        )
+    }
+
+    private func lyricFontSize(for emphasis: CGFloat) -> CGFloat {
+        settings.contextLyricSize
+            + (settings.currentLyricSize - settings.contextLyricSize) * emphasis
+    }
+
+    private func lyricFontWeight(for emphasis: CGFloat) -> Font.Weight {
+        if emphasis <= 0.001 { return .regular }
+        if emphasis >= 0.999 { return .semibold }
+        return .medium
+    }
+
+    private func lyricForegroundStyle(for emphasis: CGFloat) -> Color {
+        Color.primary.opacity(
+            settings.contextOpacity + (1 - settings.contextOpacity) * emphasis
+        )
+    }
+
+    /// The prelude identity card reserves one current lyric row box, the group
+    /// spacing and one context row box: exactly the two-line lyric viewport. The
+    /// artist line then keeps bottom breathing room instead of being cut by the
+    /// viewport clip, and no next lyric line peeks in below the card.
+    private var identityCard: some View {
+        VStack(spacing: LyricsAppearance.groupSpacing) {
+            Text(model.message.title)
+                .font(.system(size: settings.currentLyricSize, weight: .semibold))
+                .foregroundStyle(.primary)
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(height: LyricsAppearance.lyricLineHeight(fontSize: settings.currentLyricSize))
+            if settings.displayLines > 1, !model.message.artist.isEmpty {
+                contextLyric(model.message.artist)
+                    .frame(height: LyricsAppearance.lyricLineHeight(fontSize: settings.contextLyricSize))
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func lyricTrackRow(at index: Int) -> some View {
+        if index == -1, model.message.current == nil {
+            identityCard
+        } else if let text = model.message.lyricText(at: index) {
+            let emphasis = emphasis(for: index)
+            if emphasis <= 0.001 {
+                // `.transition(.identity)` keeps the styling swap instant: without it
+                // SwiftUI cross-fades the swapped row content during the scroll and
+                // renders the same lyric twice.
+                contextLyric(text).transition(.identity)
+            } else if index == activeIndex,
+                      let lyric = model.message.currentLyric,
+                      lyric.text == text {
+                TimedLyricText(
+                    lyric: lyric,
+                    playbackPosition: model.message.playbackPosition,
+                    fontSize: lyricFontSize(for: emphasis)
+                )
+                .font(.system(
+                    size: lyricFontSize(for: emphasis),
+                    weight: lyricFontWeight(for: emphasis)
+                ))
+                .foregroundStyle(.primary)
+                .transition(.identity)
+            } else {
+                Text(text)
+                    .font(.system(
+                        size: lyricFontSize(for: emphasis),
+                        weight: lyricFontWeight(for: emphasis)
+                    ))
+                    .foregroundStyle(lyricForegroundStyle(for: emphasis))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(nil)
+                    .lineSpacing(LyricsAppearance.lineSpacing)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .transition(.identity)
+            }
+        } else {
+            Color.clear.frame(height: 0)
+        }
+    }
+
+    private func synchronizeToCurrentMessage() {
+        let index = model.message.selectedLyricIndex
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            activeIndex = index
+            anchorIndex = index < 0
+                ? -1
+                : (settings.displayLines == 3 ? max(0, index - 1) : index)
+            trackOffset = 0
+            styleProgress = 0
+            isScrolling = false
+        }
+    }
+
+    private func handleLyricIndexChange() {
+        let targetIndex = model.message.selectedLyricIndex
+        guard activeIndex != -2, targetIndex != activeIndex else {
+            synchronizeToCurrentMessage()
+            return
+        }
+        guard model.animateLyricChange, !isScrolling,
+              let exitingRowHeight = rowHeights[anchorIndex] else {
+            synchronizeToCurrentMessage()
+            return
+        }
+
+        isScrolling = true
+        styleProgress = 0
+        let distance = exitingRowHeight + LyricsAppearance.groupSpacing
+        withAnimation(
+            .easeInOut(duration: LyricsAppearance.currentLineTransitionDuration),
+            completionCriteria: .logicallyComplete
+        ) {
+            trackOffset += distance
+            styleProgress = 1
+        } completion: {
+            // A newer index change may have superseded this transition; only the
+            // transition that is still current may settle the styling and anchor.
+            guard model.message.selectedLyricIndex == targetIndex else { return }
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                activeIndex = targetIndex
+                anchorIndex = targetIndex < 0
+                    ? -1
+                    : (settings.displayLines == 3 ? max(0, targetIndex - 1) : targetIndex)
+                trackOffset = 0
+                styleProgress = 0
+                isScrolling = false
+            }
+        }
+    }
+
+    private func contextLyric(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: settings.contextLyricSize, weight: .regular))
+            .foregroundStyle(.secondary.opacity(settings.contextOpacity))
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+            .lineSpacing(LyricsAppearance.lineSpacing)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity)
+    }
+}
+
+private struct LyricsSettingsView: View {
+    @ObservedObject var settings: LyricsAppearanceSettings
+
+    var body: some View {
+        Form {
+            Section("Lyrics") {
+                settingSlider(
+                    "Current lyric size",
+                    value: settings.currentLyricSize,
+                    range: 20...48,
+                    valueText: "\(Int(settings.currentLyricSize.rounded())) pt",
+                    set: settings.setCurrentLyricSize
+                )
+                settingSlider(
+                    "Context lyric size",
+                    value: settings.contextLyricSize,
+                    range: 12...32,
+                    valueText: "\(Int(settings.contextLyricSize.rounded())) pt",
+                    set: settings.setContextLyricSize
+                )
+                settingSlider(
+                    "Context opacity",
+                    value: settings.contextOpacity,
+                    range: 0.2...0.9,
+                    valueText: "\(Int((settings.contextOpacity * 100).rounded()))%",
+                    set: settings.setContextOpacity
+                )
+                Picker("Display lines", selection: Binding(
+                    get: { settings.displayLines },
+                    set: settings.setDisplayLines
+                )) {
+                    Text("1").tag(1)
+                    Text("2").tag(2)
+                    Text("3").tag(3)
+                }
+            }
+
+            Section("Window") {
+                settingSlider(
+                    "Glass tint",
+                    value: settings.backgroundOpacity,
+                    range: 0...1,
+                    valueText: "\(Int((settings.backgroundOpacity * 100).rounded()))%",
+                    set: settings.setBackgroundOpacity
+                )
+                Toggle("Remember window position", isOn: Binding(
+                    get: { settings.rememberWindowPosition },
+                    set: settings.setRememberWindowPosition
+                ))
+                Toggle("Restore window position on launch", isOn: Binding(
+                    get: { settings.restoreWindowPosition },
+                    set: settings.setRestoreWindowPosition
+                ))
+            }
+
+            HStack {
+                Spacer()
+                Button("Restore Defaults", action: settings.restoreDefaults)
+            }
+        }
+        .formStyle(.grouped)
+        .padding(20)
+        .frame(width: 440)
+    }
+
+    private func settingSlider(
+        _ title: String,
+        value: Double,
+        range: ClosedRange<Double>,
+        valueText: String,
+        set: @escaping (Double) -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(valueText)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+            Slider(value: Binding(
+                get: { value },
+                set: set
+            ), in: range)
+        }
     }
 }
 
@@ -138,9 +1006,12 @@ private final class LyricsPanel: NSPanel {
 }
 
 @MainActor
-private final class AppDelegate: NSObject, NSApplicationDelegate {
+private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let model = PanelModel()
+    private let settings = LyricsAppearanceSettings()
     private var panel: LyricsPanel?
+    private var glassView: NSGlassEffectView?
+    private var settingsWindow: NSWindow?
     private var inputSource: DispatchSourceRead?
     private var inputBuffer = Data()
     private var hotKeyHandler: EventHandlerRef?
@@ -149,6 +1020,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        settings.onAppearanceChange = { [weak self] in self?.updatePanelFrame() }
+        settings.onGlassIntensityChange = { [weak self] in self?.updateGlassTint() }
         createPanel()
         let selfTestMode = CommandLine.arguments.contains("--self-test")
         if !selfTestMode {
@@ -173,12 +1046,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createPanel() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = NSSize(width: 900, height: 174)
-        let frame = NSRect(
+        let size = NSSize(
+            width: LyricsAppearance.panelWidth,
+            height: LyricsAppearance.panelHeight(for: settings)
+        )
+        let defaultFrame = NSRect(
             x: screen.midX - size.width / 2,
             y: screen.minY + 54,
             width: size.width,
             height: size.height
+        )
+        let frame = settings.restoredPanelFrame(
+            size: size,
+            screens: NSScreen.screens.map(\.visibleFrame),
+            defaultFrame: defaultFrame
         )
         let panel = LyricsPanel(
             contentRect: frame,
@@ -195,9 +1076,21 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.isMovableByWindowBackground = false
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: LyricsPanelView(model: model))
-        panel.orderFrontRegardless()
+        let glassView = NSGlassEffectView(frame: NSRect(origin: .zero, size: size))
+        glassView.style = .clear
+        glassView.cornerRadius = LyricsAppearance.cornerRadius
+        glassView.autoresizingMask = [.width, .height]
+        glassView.contentView = NSHostingView(
+            rootView: LyricsPanelView(model: model, settings: settings)
+        )
+        panel.contentView = glassView
+        panel.delegate = self
+        if !CommandLine.arguments.contains("--initially-hidden") {
+            panel.orderFrontRegardless()
+        }
         self.panel = panel
+        self.glassView = glassView
+        updateGlassTint()
     }
 
     private func installInputReader() {
@@ -214,7 +1107,17 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             while let newline = inputBuffer.firstIndex(of: 0x0A) {
                 let line = inputBuffer.prefix(upTo: newline)
                 inputBuffer.removeSubrange(...newline)
-                model.accept(Data(line))
+                guard let message = model.accept(Data(line)) else { continue }
+                if let visible = message.panelVisible {
+                    if visible {
+                        panel?.orderFrontRegardless()
+                    } else {
+                        panel?.orderOut(nil)
+                    }
+                }
+                if message.openSettings == true {
+                    showSettings()
+                }
             }
         }
         source.setCancelHandler {}
@@ -304,6 +1207,73 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func showSettings() {
+        if let settingsWindow, settingsWindow.isVisible {
+            NSApp.activate(ignoringOtherApps: true)
+            settingsWindow.makeKeyAndOrderFront(nil)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 590),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Applyrx Settings"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: LyricsSettingsView(settings: settings))
+        window.delegate = self
+        window.center()
+        settingsWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func updatePanelFrame() {
+        guard let panel else { return }
+        let frame = panel.frame
+        let updated = NSRect(
+            x: frame.minX,
+            y: frame.minY,
+            width: LyricsAppearance.panelWidth,
+            height: LyricsAppearance.panelHeight(for: settings)
+        )
+        panel.setFrame(updated, display: true)
+        settings.savePanelFrame(updated)
+    }
+
+    private func updateGlassTint() {
+        guard let glassView else { return }
+        let tintStrength = settings.backgroundOpacity * 0.04
+        glassView.tintColor = tintStrength > 0
+            ? NSColor.controlAccentColor.withAlphaComponent(tintStrength)
+            : nil
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        guard let movedWindow = notification.object as? NSWindow,
+              movedWindow === panel else {
+            return
+        }
+        settings.savePanelFrame(movedWindow.frame)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let resizedWindow = notification.object as? NSWindow,
+              resizedWindow === panel else {
+            return
+        }
+        settings.savePanelFrame(resizedWindow.frame)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closedWindow = notification.object as? NSWindow,
+              closedWindow === settingsWindow else {
+            return
+        }
+        settingsWindow = nil
+    }
+
     private func runSelfTest() {
         handleHotKey(1)
         let hideWorks = panel?.isVisible == false
@@ -315,8 +1285,23 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setMoveMode(false)
         let restoreClickThroughWorks = panel?.ignoresMouseEvents == true
             && panel?.isMovableByWindowBackground == false
+        let wordChecks = timedLyricsSelfTest()
+        let settingChecks = LyricsAppearanceSettings.defaultsSelfTest()
+        let hostingView = glassView?.contentView as? NSHostingView<LyricsPanelView>
         let result: [String: Bool] = [
             "panelVisible": panel?.isVisible == true,
+            "nativeGlassSurface": glassView?.style == .clear
+                && glassView?.cornerRadius == LyricsAppearance.cornerRadius
+                && hostingView != nil
+                && panel?.backgroundColor == .clear
+                && panel?.isOpaque == false,
+            "panelTransparency": panel?.alphaValue == 1
+                && panel?.hasShadow == false
+                && panel?.contentView === glassView,
+            "glassLayout": glassView?.frame == panel?.contentView?.bounds
+                && glassView?.autoresizingMask == [.width, .height],
+            "hostingViewHasNoLayerBackground": hostingView?.layer?.backgroundColor == nil,
+            "glassTintIsBounded": (glassView?.tintColor?.alphaComponent ?? 0) <= 0.04,
             "nonActivating": panel?.styleMask.contains(.nonactivatingPanel) == true
                 && panel?.canBecomeKey == false,
             "floating": panel?.level == .floating,
@@ -324,12 +1309,266 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             "registeredGlobalHotKeys": hotKeys.count == 2,
             "hotKeyVisibilityToggle": hideWorks && showWorks,
             "temporaryDragMode": dragModeWorks && restoreClickThroughWorks,
-        ]
+        ].merging(wordChecks, uniquingKeysWith: { _, new in new })
+            .merging(settingChecks, uniquingKeysWith: { _, new in new })
         if let data = try? JSONSerialization.data(withJSONObject: result),
            let output = String(data: data, encoding: .utf8) {
             FileHandle.standardOutput.write(Data((output + "\n").utf8))
         }
         NSApp.terminate(nil)
+    }
+
+    private func timedLyricsSelfTest() -> [String: Bool] {
+        let payload = Data(
+            #"""
+            {
+              "title":"Test",
+              "artist":"Artist",
+              "playbackState":"playing",
+              "matchStatus":"matched",
+              "playbackPosition":1.5,
+              "lyricIndex":0,
+              "current":"我在海中",
+              "currentLyric":{
+                "text":"我在海中",
+                "startTime":0,
+                "endTime":4,
+                "words":[
+                  {"startTime":0,"endTime":1,"text":"我"},
+                  {"startTime":1,"endTime":2,"text":"在"},
+                  {"startTime":2,"endTime":3,"text":"海"},
+                  {"startTime":3,"endTime":4,"text":"中"}
+                ]
+              }
+            }
+            """#.utf8
+        )
+        let decoded = try? JSONDecoder().decode(PanelMessage.self, from: payload)
+        let words = decoded?.currentLyric
+        let atPlayback = words?.appearances(at: decoded?.playbackPosition)
+        let afterSeek = words?.appearances(at: 2.5)
+        let afterResume = words?.appearances(at: 3.5)
+        let pausedAtSamePosition = words?.appearances(at: 1.5)
+        let textPreserved = words?.styledText(
+            at: 1.5,
+            fontSize: LyricsAppearance.defaultCurrentFontSize
+        )
+            .map { String($0.characters) == "我在海中" } ?? false
+        let contextPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","previousLines":["p0","p1"],"current":"line","nextLines":["n1","n2"]}"#.utf8
+        )
+        let contextMessage = try? JSONDecoder().decode(PanelMessage.self, from: contextPayload)
+        let oneLineContext = contextMessage?.contextLines(displayLines: 1)
+        let threeLineContext = contextMessage?.contextLines(displayLines: 3)
+        let twoLineContext = contextMessage?.contextLines(displayLines: 2)
+        let openingContextPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","current":"line","nextLines":["n1","n2"]}"#.utf8
+        )
+        let openingContextMessage = try? JSONDecoder().decode(
+            PanelMessage.self,
+            from: openingContextPayload
+        )
+        let openingContext = openingContextMessage?.contextLines(displayLines: 2)
+        let endingContextPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","previousLines":["p1"],"current":"line"}"#.utf8
+        )
+        let endingContextMessage = try? JSONDecoder().decode(
+            PanelMessage.self,
+            from: endingContextPayload
+        )
+        let endingTwoLineContext = endingContextMessage?.contextLines(displayLines: 2)
+        let endingThreeLineContext = endingContextMessage?.contextLines(displayLines: 3)
+        let openingThreeLineContext = openingContextMessage?.contextLines(displayLines: 3)
+        let commandPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","panelVisible":false,"openSettings":true}"#.utf8
+        )
+        let commandMessage = try? JSONDecoder().decode(PanelMessage.self, from: commandPayload)
+
+        let noTimingPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","current":"plain line"}"#.utf8
+        )
+        let noTiming = try? JSONDecoder().decode(PanelMessage.self, from: noTimingPayload)
+        let noLyricsPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"notFound"}"#.utf8
+        )
+        let noLyrics = try? JSONDecoder().decode(PanelMessage.self, from: noLyricsPayload)
+
+        let invalidTimingPayload = Data(
+            #"""
+            {
+              "title":"Test",
+              "artist":"Artist",
+              "playbackState":"playing",
+              "matchStatus":"matched",
+              "current":"fallback line",
+              "currentLyric":{
+                "text":"fallback line",
+                "startTime":0,
+                "endTime":2,
+                "words":[{"startTime":0,"endTime":3,"text":"invalid"}]
+              }
+            }
+            """#.utf8
+        )
+        let invalidTiming = try? JSONDecoder().decode(
+            PanelMessage.self,
+            from: invalidTimingPayload
+        )
+        let mismatchedWordsPayload = Data(
+            #"""
+            {
+              "text":"complete original line",
+              "startTime":0,
+              "endTime":2,
+              "words":[{"startTime":0,"endTime":1,"text":"different"}]
+            }
+            """#.utf8
+        )
+        let mismatchedWords = try? JSONDecoder().decode(
+            CurrentLyric.self,
+            from: mismatchedWordsPayload
+        )
+
+        return [
+            "contextTextIsSubordinate": LyricsAppearance.defaultContextFontSize
+                / LyricsAppearance.defaultCurrentFontSize >= 0.60
+                && LyricsAppearance.defaultContextFontSize
+                / LyricsAppearance.defaultCurrentFontSize <= 0.70,
+            "currentLineTransitionIsShort": LyricsAppearance.currentLineTransitionDuration
+                >= 0.15 && LyricsAppearance.currentLineTransitionDuration <= 0.25,
+            "panelHeightsMatchDisplayLines":
+                // One current row box (36) plus one context row box (24) per extra
+                // line, group spacing between lines, and the vertical padding.
+                LyricsAppearance.panelHeight(
+                    currentLyricSize: 30, contextLyricSize: 20, displayLines: 1
+                ) == 48
+                && LyricsAppearance.panelHeight(
+                    currentLyricSize: 30, contextLyricSize: 20, displayLines: 2
+                ) == 74
+                && LyricsAppearance.panelHeight(
+                    currentLyricSize: 30, contextLyricSize: 20, displayLines: 3
+                ) == 100
+                && LyricsAppearance.lineSpacing > 0,
+            "panelHeightCoversRenderedLineBoxes": {
+                let currentFont = NSFont.systemFont(ofSize: 30)
+                let contextFont = NSFont.systemFont(ofSize: 20)
+                let currentBox = currentFont.ascender - currentFont.descender + currentFont.leading
+                let contextBox = contextFont.ascender - contextFont.descender + contextFont.leading
+                for displayLines in 1...3 {
+                    let viewport = LyricsAppearance.panelHeight(
+                        currentLyricSize: 30, contextLyricSize: 20, displayLines: displayLines
+                    ) - 2 * LyricsAppearance.verticalPadding
+                    let needed = currentBox
+                        + CGFloat(displayLines - 1) * (contextBox + LyricsAppearance.groupSpacing)
+                    if viewport < needed { return false }
+                }
+                return true
+            }(),
+            "normalLyricAdvanceAnimates": PanelModel.shouldAnimateLyricChange(
+                from: 0, to: 1, seeked: false, trackChanged: false
+            ),
+            "preludeToFirstLyricAnimates": PanelModel.shouldAnimateLyricChange(
+                from: -1, to: 0, seeked: false, trackChanged: false
+            ),
+            "pauseDoesNotAnimate": !PanelModel.shouldAnimateLyricChange(
+                from: 0, to: 0, seeked: false, trackChanged: false
+            ),
+            "largeSeekSkipsIntermediateAnimation": !PanelModel.shouldAnimateLyricChange(
+                from: 0, to: 8, seeked: false, trackChanged: false
+            ) && !PanelModel.shouldAnimateLyricChange(
+                from: 0, to: 1, seeked: true, trackChanged: false
+            ),
+            "trackChangeDoesNotAnimate": !PanelModel.shouldAnimateLyricChange(
+                from: 8, to: -1, seeked: false, trackChanged: true
+            ),
+            "targetLyricBecomesCurrentWithoutStyleJump": {
+                let midScroll = LyricTransitionStyle.emphasis(
+                    forIndex: 1, activeIndex: 0, incomingIndex: 1,
+                    currentSlot: 0, progress: 0.5
+                )
+                let atScrollEnd = LyricTransitionStyle.emphasis(
+                    forIndex: 1, activeIndex: 0, incomingIndex: 1,
+                    currentSlot: 0, progress: 1
+                )
+                let settled = LyricTransitionStyle.emphasis(
+                    forIndex: 1, activeIndex: 1, incomingIndex: 1,
+                    currentSlot: 0, progress: 0
+                )
+                let outgoingKeepsItsStyle = LyricTransitionStyle.emphasis(
+                    forIndex: 0, activeIndex: 0, incomingIndex: 1,
+                    currentSlot: 0, progress: 0.5
+                )
+                // The incoming row is styled strictly between context and current
+                // while it scrolls, and its styling at the end of the scroll is
+                // exactly the settled styling: no post-scroll jump.
+                return midScroll > 0.001 && midScroll < 0.999
+                    && atScrollEnd == settled
+                    && settled == 1
+                    && outgoingKeepsItsStyle == 1
+            }(),
+            "threeLineOutgoingLyricSettlesIntoContext": {
+                let atScrollEnd = LyricTransitionStyle.emphasis(
+                    forIndex: 4, activeIndex: 4, incomingIndex: 5,
+                    currentSlot: 1, progress: 1
+                )
+                let settled = LyricTransitionStyle.emphasis(
+                    forIndex: 4, activeIndex: 5, incomingIndex: 5,
+                    currentSlot: 1, progress: 0
+                )
+                return atScrollEnd <= 0.001 && settled <= 0.001
+            }(),
+            "identityCardFitsLyricViewport": {
+                let viewport = LyricsAppearance.panelHeight(
+                    currentLyricSize: LyricsAppearance.defaultCurrentFontSize,
+                    contextLyricSize: LyricsAppearance.defaultContextFontSize,
+                    displayLines: 2
+                ) - 2 * LyricsAppearance.verticalPadding
+                let identityCard = LyricsAppearance.lyricLineHeight(
+                    fontSize: LyricsAppearance.defaultCurrentFontSize
+                ) + LyricsAppearance.groupSpacing + LyricsAppearance.lyricLineHeight(
+                    fontSize: LyricsAppearance.defaultContextFontSize
+                )
+                return identityCard <= viewport
+            }(),
+            "displayLineSelections": oneLineContext?.previous.isEmpty == true
+                && oneLineContext?.next.isEmpty == true
+                && twoLineContext?.previous.isEmpty == true
+                && twoLineContext?.next == ["n1"]
+                && openingContext?.previous.isEmpty == true
+                && openingContext?.next == ["n1"]
+                && threeLineContext?.previous == ["p1"]
+                && threeLineContext?.next == ["n1"]
+                && endingTwoLineContext?.previous.isEmpty == true
+                && endingTwoLineContext?.next.isEmpty == true
+                && endingThreeLineContext?.previous == ["p1"]
+                && endingThreeLineContext?.next.isEmpty == true
+                && openingThreeLineContext?.previous.isEmpty == true
+                && openingThreeLineContext?.next == ["n1"]
+                && LyricsAppearance.defaultDisplayLines == 2,
+            "settingsCommandDecode": commandMessage?.panelVisible == false
+                && commandMessage?.openSettings == true,
+            "wordTimingDecode": words?.words?.count == 4,
+            "lyricIndexIsDecoded": decoded?.lyricIndex == 0,
+            "wordTimingPlayback": atPlayback == [.completed, .current, .upcoming, .upcoming],
+            "wordTimingSeek": afterSeek == [.completed, .completed, .current, .upcoming],
+            "wordTimingPauseResume": pausedAtSamePosition == atPlayback
+                && afterResume == [.completed, .completed, .completed, .current],
+            "wordTimingPreservesLineText": textPreserved,
+            "missingTimingFallback": noTiming?.current == "plain line"
+                && noTiming?.currentLyric == nil,
+            "trackIdentityAvailableWithoutLyrics": noLyrics?.title == "Test"
+                && noLyrics?.artist == "Artist"
+                && noLyrics?.current == nil,
+            "invalidTimingFallback": invalidTiming?.current == "fallback line"
+                && invalidTiming?.currentLyric?.words == nil,
+            "wordTextMismatchFallback": mismatchedWords?.styledText(
+                at: 0.5,
+                fontSize: LyricsAppearance.defaultCurrentFontSize
+            ) == nil
+                && mismatchedWords?.text == "complete original line",
+            "noLyricsState": PanelMessage.empty.current == nil
+                && PanelMessage.empty.currentLyric == nil,
+        ]
     }
 }
 

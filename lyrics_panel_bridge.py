@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -22,16 +23,103 @@ PROJECT_DIR = Path(__file__).resolve().parent
 def presentation_state(state: ManagerState) -> dict:
     track = state.snapshot.track
     position = state.lyricPosition
+    current_line = position.current or position.previous
+    lines = state.lyrics.lines if state.lyrics is not None else ()
+    current_index = position.currentIndex
+    if current_index is None and current_line is not None:
+        current_index = next(
+            (
+                index for index, line in enumerate(lines)
+                if line.startTime == current_line.startTime
+            ),
+            None,
+        )
+    current_lyric = None
+    if current_line is not None:
+        words = []
+        valid_words = True
+        try:
+            for word in current_line.words or ():
+                start = word.startTime
+                end = word.endTime
+                if (
+                    isinstance(start, bool)
+                    or not isinstance(start, (int, float))
+                    or isinstance(end, bool)
+                    or not isinstance(end, (int, float))
+                    or not isinstance(word.text, str)
+                    or not math.isfinite(start)
+                    or not math.isfinite(end)
+                    or start < current_line.startTime
+                    or end > current_line.endTime
+                    or end <= start
+                ):
+                    valid_words = False
+                    break
+                words.append({
+                    "startTime": start,
+                    "endTime": end,
+                    "text": word.text,
+                })
+        except (AttributeError, TypeError):
+            valid_words = False
+        current_lyric = {
+            "text": current_line.text,
+            "startTime": current_line.startTime,
+            "endTime": current_line.endTime,
+            "words": words if valid_words else [],
+        }
+    previous_lines = []
+    next_lines = []
+    if current_line is not None and current_index is not None:
+        previous_lines = [
+            line.text for line in lines[max(0, current_index - 2):current_index]
+        ]
+        next_lines = [
+            line.text for line in lines[current_index + 1:current_index + 3]
+        ]
+        previous = lines[current_index - 1] if current_index > 0 else None
+        next_line = lines[current_index + 1] if current_index + 1 < len(lines) else None
+    elif state.lyrics is not None and position.currentIndex is None and position.timestamp >= 0:
+        if lines and position.timestamp < lines[0].startTime:
+            next_lines = [line.text for line in lines[:2]]
+            next_line = lines[0]
+        else:
+            next_line = position.next
+        previous = None
+    else:
+        previous = None
+        next_line = position.next
     return {
         "title": track.title if track else "",
         "artist": track.artist if track else "",
         "playbackState": state.snapshot.playbackState,
+        "playbackPosition": position.timestamp if math.isfinite(position.timestamp) else None,
         "matchStatus": state.matchStatus,
-        "previous": position.previous.text if position.previous else None,
-        "current": position.current.text if position.current else None,
-        "next": position.next.text if position.next else None,
+        "lyricIndex": current_index if current_index is not None else -1,
+        "seeked": state.snapshot.seeked,
+        "trackChanged": state.snapshot.trackChanged,
+        "previous": previous.text if previous else None,
+        "previousLines": previous_lines,
+        "current": current_line.text if current_line else None,
+        "currentLyric": current_lyric,
+        "next": next_line.text if next_line else None,
+        "nextLines": next_lines,
         "message": state.message,
     }
+
+
+def panel_message(
+    state: ManagerState,
+    *,
+    panel_visible: Optional[bool] = None,
+    open_settings: bool = False,
+) -> dict:
+    message = presentation_state(state)
+    if panel_visible is not None:
+        message["panelVisible"] = panel_visible
+    message["openSettings"] = open_settings
+    return message
 
 
 def find_panel_executable(explicit: Optional[Path] = None) -> Path:
@@ -73,20 +161,31 @@ class PanelBridge:
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
+        self._control_lock = threading.Lock()
+        self._panel_visible = True
+        self._panel_visibility_pending = True
+        self._open_settings = False
 
     @property
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
-    def start(self) -> None:
+    def start(self, panel_visible: bool = True) -> None:
         if self.is_running:
             return
         if self.process is not None:
             self.stop()
         binary = find_panel_executable(self.executable)
         self.stop_event.clear()
+        with self._control_lock:
+            self._panel_visible = bool(panel_visible)
+            self._panel_visibility_pending = True
+            self._open_settings = False
+        arguments = [str(binary)]
+        if not panel_visible:
+            arguments.append("--initially-hidden")
         self.process = subprocess.Popen(
-            [str(binary)],
+            arguments,
             stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -98,6 +197,17 @@ class PanelBridge:
             daemon=True,
         )
         self.thread.start()
+
+    def set_panel_visible(self, visible: bool) -> None:
+        with self._control_lock:
+            visible = bool(visible)
+            if self._panel_visible != visible:
+                self._panel_visible = visible
+                self._panel_visibility_pending = True
+
+    def request_settings(self) -> None:
+        with self._control_lock:
+            self._open_settings = True
 
     def stop(self) -> None:
         self.stop_event.set()
@@ -128,9 +238,23 @@ class PanelBridge:
                 process = self.process
                 if process is None or process.poll() is not None or process.stdin is None:
                     return
+                with self._control_lock:
+                    desired_visibility = self._panel_visible
+                    visibility_pending = self._panel_visibility_pending
+                    panel_visible = desired_visibility if visibility_pending else None
+                    self._panel_visibility_pending = False
+                    open_settings = self._open_settings
+                    self._open_settings = False
+                if not desired_visibility and not open_settings and not visibility_pending:
+                    self.stop_event.wait(self.interval)
+                    continue
                 state = manager.update(watcher.poll())
                 payload = json.dumps(
-                    presentation_state(state),
+                    panel_message(
+                        state,
+                        panel_visible=panel_visible,
+                        open_settings=open_settings,
+                    ),
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8") + b"\n"
