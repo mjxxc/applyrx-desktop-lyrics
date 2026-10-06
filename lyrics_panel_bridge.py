@@ -23,7 +23,17 @@ PROJECT_DIR = Path(__file__).resolve().parent
 def presentation_state(state: ManagerState) -> dict:
     track = state.snapshot.track
     position = state.lyricPosition
-    current_line = position.current
+    current_line = position.current or position.previous
+    lines = state.lyrics.lines if state.lyrics is not None else ()
+    current_index = position.currentIndex
+    if current_index is None and current_line is not None:
+        current_index = next(
+            (
+                index for index, line in enumerate(lines)
+                if line.startTime == current_line.startTime
+            ),
+            None,
+        )
     current_lyric = None
     if current_line is not None:
         words = []
@@ -61,29 +71,39 @@ def presentation_state(state: ManagerState) -> dict:
         }
     previous_lines = []
     next_lines = []
-    if (
-        current_line is not None
-        and state.lyrics is not None
-        and position.currentIndex is not None
-    ):
-        lines = state.lyrics.lines
+    if current_line is not None and current_index is not None:
         previous_lines = [
-            line.text for line in lines[max(0, position.currentIndex - 2):position.currentIndex]
+            line.text for line in lines[max(0, current_index - 2):current_index]
         ]
         next_lines = [
-            line.text for line in lines[position.currentIndex + 1:position.currentIndex + 3]
+            line.text for line in lines[current_index + 1:current_index + 3]
         ]
+        previous = lines[current_index - 1] if current_index > 0 else None
+        next_line = lines[current_index + 1] if current_index + 1 < len(lines) else None
+    elif state.lyrics is not None and position.currentIndex is None and position.timestamp >= 0:
+        if lines and position.timestamp < lines[0].startTime:
+            next_lines = [line.text for line in lines[:2]]
+            next_line = lines[0]
+        else:
+            next_line = position.next
+        previous = None
+    else:
+        previous = None
+        next_line = position.next
     return {
         "title": track.title if track else "",
         "artist": track.artist if track else "",
         "playbackState": state.snapshot.playbackState,
         "playbackPosition": position.timestamp if math.isfinite(position.timestamp) else None,
         "matchStatus": state.matchStatus,
-        "previous": position.previous.text if position.previous else None,
+        "lyricIndex": current_index if current_index is not None else -1,
+        "seeked": state.snapshot.seeked,
+        "trackChanged": state.snapshot.trackChanged,
+        "previous": previous.text if previous else None,
         "previousLines": previous_lines,
         "current": current_line.text if current_line else None,
         "currentLyric": current_lyric,
-        "next": position.next.text if position.next else None,
+        "next": next_line.text if next_line else None,
         "nextLines": next_lines,
         "message": state.message,
     }

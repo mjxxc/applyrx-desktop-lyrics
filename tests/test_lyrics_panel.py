@@ -104,6 +104,44 @@ class PanelViewModelTests(unittest.TestCase):
             ],
         }, payload["currentLyric"])
 
+    def test_ended_current_is_retained_until_next_line_start(self):
+        lyrics = Lyrics(
+            (LyricLine(0, 1, "first"), LyricLine(2, 3, "second")),
+            "en",
+            False,
+            "100000001",
+        )
+        manager = CurrentTrackManager(ProviderStub(lyrics), executor=ImmediateExecutor())
+
+        gap = presentation_state(manager.update(make_snapshot(position=1.5)))
+        next_line = presentation_state(manager.update(make_snapshot(position=2.0)))
+
+        self.assertEqual("first", gap["current"])
+        self.assertEqual("first", gap["currentLyric"]["text"])
+        self.assertEqual("second", gap["next"])
+        self.assertEqual(0, gap["lyricIndex"])
+        self.assertEqual("second", next_line["current"])
+        self.assertEqual(1, next_line["lyricIndex"])
+
+    def test_prelude_projects_track_identity_and_first_lyric_start(self):
+        lyrics = Lyrics(
+            (LyricLine(4, 6, "first lyric"), LyricLine(7, 9, "second lyric")),
+            "en",
+            False,
+            "100000001",
+        )
+        manager = CurrentTrackManager(ProviderStub(lyrics), executor=ImmediateExecutor())
+
+        prelude = presentation_state(manager.update(make_snapshot(position=0.5)))
+        first_line = presentation_state(manager.update(make_snapshot(position=4.0)))
+
+        self.assertEqual(("A", "Artist"), (prelude["title"], prelude["artist"]))
+        self.assertIsNone(prelude["current"])
+        self.assertEqual("first lyric", prelude["next"])
+        self.assertEqual(-1, prelude["lyricIndex"])
+        self.assertEqual("first lyric", first_line["current"])
+        self.assertEqual(0, first_line["lyricIndex"])
+
     def test_projects_two_presentation_context_lines_without_relocating_current(self):
         lyrics = Lyrics(
             tuple(LyricLine(index, index + 1, f"line {index}") for index in range(5)),
@@ -217,6 +255,8 @@ class PanelViewModelTests(unittest.TestCase):
         absent = presentation_state(missing.update(make_snapshot()))
         self.assertEqual("notFound", absent["matchStatus"])
         self.assertIsNone(absent["current"])
+        self.assertEqual("A", absent["title"])
+        self.assertEqual("Artist", absent["artist"])
 
     def test_track_switch_projects_new_track_without_old_lyrics(self):
         first = Lyrics(
