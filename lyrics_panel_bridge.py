@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -22,13 +23,51 @@ PROJECT_DIR = Path(__file__).resolve().parent
 def presentation_state(state: ManagerState) -> dict:
     track = state.snapshot.track
     position = state.lyricPosition
+    current_line = position.current
+    current_lyric = None
+    if current_line is not None:
+        words = []
+        valid_words = True
+        try:
+            for word in current_line.words or ():
+                start = word.startTime
+                end = word.endTime
+                if (
+                    isinstance(start, bool)
+                    or not isinstance(start, (int, float))
+                    or isinstance(end, bool)
+                    or not isinstance(end, (int, float))
+                    or not isinstance(word.text, str)
+                    or not math.isfinite(start)
+                    or not math.isfinite(end)
+                    or start < current_line.startTime
+                    or end > current_line.endTime
+                    or end <= start
+                ):
+                    valid_words = False
+                    break
+                words.append({
+                    "startTime": start,
+                    "endTime": end,
+                    "text": word.text,
+                })
+        except (AttributeError, TypeError):
+            valid_words = False
+        current_lyric = {
+            "text": current_line.text,
+            "startTime": current_line.startTime,
+            "endTime": current_line.endTime,
+            "words": words if valid_words else [],
+        }
     return {
         "title": track.title if track else "",
         "artist": track.artist if track else "",
         "playbackState": state.snapshot.playbackState,
+        "playbackPosition": position.timestamp if math.isfinite(position.timestamp) else None,
         "matchStatus": state.matchStatus,
         "previous": position.previous.text if position.previous else None,
-        "current": position.current.text if position.current else None,
+        "current": current_line.text if current_line else None,
+        "currentLyric": current_lyric,
         "next": position.next.text if position.next else None,
         "message": state.message,
     }

@@ -2,11 +2,122 @@ import AppKit
 import Carbon
 import SwiftUI
 
+private struct TimedLyricWord: Decodable, Equatable {
+    let startTime: Double
+    let endTime: Double
+    let text: String
+}
+
+private enum WordAppearance: Equatable {
+    case completed
+    case current
+    case upcoming
+}
+
+private struct CurrentLyric: Decodable {
+    let text: String
+    let startTime: Double?
+    let endTime: Double?
+    let words: [TimedLyricWord]?
+
+    private enum CodingKeys: String, CodingKey {
+        case text
+        case startTime
+        case endTime
+        case words
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        text = try container.decode(String.self, forKey: .text)
+        startTime = try? container.decode(Double.self, forKey: .startTime)
+        endTime = try? container.decode(Double.self, forKey: .endTime)
+
+        guard let decodedWords = try? container.decode(
+            [TimedLyricWord].self,
+            forKey: .words
+        ), let startTime, let endTime,
+           startTime.isFinite, endTime.isFinite, endTime > startTime else {
+               words = nil
+               return
+        }
+        var previousStart = -Double.infinity
+        let timingsAreValid = decodedWords.allSatisfy { word in
+               let valid = word.startTime.isFinite
+                   && word.endTime.isFinite
+                   && word.startTime >= startTime
+                   && word.startTime >= previousStart
+                   && word.endTime <= endTime
+                   && word.endTime > word.startTime
+               previousStart = word.startTime
+               return valid
+        }
+        guard timingsAreValid else {
+               words = nil
+               return
+        }
+        words = decodedWords.isEmpty ? nil : decodedWords
+    }
+
+    func appearances(at position: Double?) -> [WordAppearance]? {
+        guard let words, let position, position.isFinite else {
+            return nil
+        }
+        let activeIndex = words.indices
+            .filter { words[$0].startTime <= position && position < words[$0].endTime }
+            .last
+        return words.indices.map { index in
+            if index == activeIndex {
+                return .current
+            }
+            return words[index].endTime <= position ? .completed : .upcoming
+        }
+    }
+
+    func styledText(at position: Double?) -> AttributedString? {
+        guard let words, let appearances = appearances(at: position) else {
+            return nil
+        }
+        var result = AttributedString(text)
+        result.foregroundColor = .white.opacity(0.42)
+        result.font = .system(size: 27, weight: .medium)
+        var searchStart = text.startIndex
+
+        for (index, word) in words.enumerated() {
+            guard let textRange = text.range(
+                of: word.text,
+                range: searchStart..<text.endIndex
+            ), let attributedRange = Range(textRange, in: result) else {
+                return nil
+            }
+            let color: Color
+            let weight: Font.Weight
+            switch appearances[index] {
+            case .completed:
+                color = .white.opacity(0.78)
+                weight = .medium
+            case .current:
+                color = Color(red: 0.62, green: 0.86, blue: 1.0)
+                weight = .bold
+            case .upcoming:
+                color = .white.opacity(0.42)
+                weight = .medium
+            }
+            result[attributedRange].foregroundColor = color
+            result[attributedRange].font = .system(size: 27, weight: weight)
+            searchStart = textRange.upperBound
+        }
+        return result
+    }
+}
+
 private struct PanelMessage: Decodable {
     var title: String
     var artist: String
     var playbackState: String
     var matchStatus: String
+    var playbackPosition: Double?
+    var currentLyric: CurrentLyric?
     var previous: String?
     var current: String?
     var next: String?
@@ -17,6 +128,8 @@ private struct PanelMessage: Decodable {
         artist: "",
         playbackState: "unknown",
         matchStatus: "loading",
+        playbackPosition: nil,
+        currentLyric: nil,
         previous: nil,
         current: nil,
         next: nil,
@@ -34,6 +147,22 @@ private final class PanelModel: ObservableObject {
             return
         }
         self.message = message
+    }
+}
+
+private struct TimedLyricText: View {
+    let lyric: CurrentLyric
+    let playbackPosition: Double?
+
+    private var renderedText: Text {
+        Text(lyric.styledText(at: playbackPosition) ?? AttributedString(lyric.text))
+    }
+
+    var body: some View {
+        renderedText
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -60,75 +189,65 @@ private struct LyricsPanelView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                Text(model.message.title.isEmpty ? "Apple Music" : model.message.title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                if !model.message.artist.isEmpty {
-                    Text("—")
-                        .foregroundStyle(.white.opacity(0.36))
-                    Text(model.message.artist)
-                        .font(.system(size: 13, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.70))
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 0)
-                Text(model.moveMode ? "拖动中" : statusText)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(model.moveMode ? .cyan : .white.opacity(0.55))
-                    .lineLimit(1)
-            }
-
-            VStack(spacing: 7) {
+        VStack(spacing: 10) {
+            if isMatched {
                 if isMatched, let previous = model.message.previous {
-                    Text(previous)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.34))
-                        .lineLimit(1)
+                    lyricText(previous, size: 16, opacity: 0.34)
                         .transition(.opacity)
                 }
 
-                if isMatched, let current = model.message.current {
-                    Text(current)
-                        .font(.system(size: 26, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.center)
-                        .shadow(color: .black.opacity(0.45), radius: 8, y: 1)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                } else {
-                    Text(statusText)
-                        .font(.system(size: 18, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.82))
-                        .lineLimit(1)
-                        .transition(.opacity)
+                if let current = model.message.current {
+                    Group {
+                        if let lyric = model.message.currentLyric,
+                           lyric.text == current {
+                            TimedLyricText(
+                                lyric: lyric,
+                                playbackPosition: model.message.playbackPosition
+                            )
+                        } else {
+                            Text(current)
+                                .multilineTextAlignment(.center)
+                                .lineLimit(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .font(.system(size: 27, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .shadow(color: .black.opacity(0.38), radius: 7, y: 1)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
 
-                if isMatched, let next = model.message.next {
-                    Text(next)
-                        .font(.system(size: 16, weight: .regular))
-                        .foregroundStyle(.white.opacity(0.48))
-                        .lineLimit(1)
+                if let next = model.message.next {
+                    lyricText(next, size: 16, opacity: 0.46)
                         .transition(.opacity)
                 }
+            } else {
+                Text(model.moveMode ? "拖动中" : statusText)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(model.moveMode ? .cyan : .white.opacity(0.82))
+                    .lineLimit(1)
+                    .transition(.opacity)
             }
-            .frame(maxWidth: .infinity)
-            .animation(.easeInOut(duration: 0.28), value: model.message.current)
         }
-        .padding(.horizontal, 30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 36)
         .padding(.vertical, 18)
         .background {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .fill(.black.opacity(0.54))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 22, style: .continuous)
-                        .strokeBorder(.white.opacity(0.10), lineWidth: 1)
-                }
+                .fill(.black.opacity(0.52))
         }
-        .frame(width: 900, height: 174)
+        .frame(width: 900, height: 210)
         .contentShape(Rectangle())
         .allowsHitTesting(false)
+        .animation(.easeInOut(duration: 0.18), value: model.message.current)
+    }
+
+    private func lyricText(_ text: String, size: CGFloat, opacity: Double) -> some View {
+        Text(text)
+            .font(.system(size: size, weight: .regular))
+            .foregroundStyle(.white.opacity(opacity))
+            .lineLimit(1)
+            .frame(maxWidth: .infinity)
     }
 }
 
@@ -173,7 +292,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func createPanel() {
         let screen = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
-        let size = NSSize(width: 900, height: 174)
+        let size = NSSize(width: 900, height: 210)
         let frame = NSRect(
             x: screen.midX - size.width / 2,
             y: screen.minY + 54,
@@ -315,6 +434,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         setMoveMode(false)
         let restoreClickThroughWorks = panel?.ignoresMouseEvents == true
             && panel?.isMovableByWindowBackground == false
+        let wordChecks = timedLyricsSelfTest()
         let result: [String: Bool] = [
             "panelVisible": panel?.isVisible == true,
             "nonActivating": panel?.styleMask.contains(.nonactivatingPanel) == true
@@ -324,12 +444,104 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             "registeredGlobalHotKeys": hotKeys.count == 2,
             "hotKeyVisibilityToggle": hideWorks && showWorks,
             "temporaryDragMode": dragModeWorks && restoreClickThroughWorks,
-        ]
+        ].merging(wordChecks, uniquingKeysWith: { _, new in new })
         if let data = try? JSONSerialization.data(withJSONObject: result),
            let output = String(data: data, encoding: .utf8) {
             FileHandle.standardOutput.write(Data((output + "\n").utf8))
         }
         NSApp.terminate(nil)
+    }
+
+    private func timedLyricsSelfTest() -> [String: Bool] {
+        let payload = Data(
+            #"""
+            {
+              "title":"Test",
+              "artist":"Artist",
+              "playbackState":"playing",
+              "matchStatus":"matched",
+              "playbackPosition":1.5,
+              "current":"我在海中",
+              "currentLyric":{
+                "text":"我在海中",
+                "startTime":0,
+                "endTime":4,
+                "words":[
+                  {"startTime":0,"endTime":1,"text":"我"},
+                  {"startTime":1,"endTime":2,"text":"在"},
+                  {"startTime":2,"endTime":3,"text":"海"},
+                  {"startTime":3,"endTime":4,"text":"中"}
+                ]
+              }
+            }
+            """#.utf8
+        )
+        let decoded = try? JSONDecoder().decode(PanelMessage.self, from: payload)
+        let words = decoded?.currentLyric
+        let atPlayback = words?.appearances(at: decoded?.playbackPosition)
+        let afterSeek = words?.appearances(at: 2.5)
+        let afterResume = words?.appearances(at: 3.5)
+        let pausedAtSamePosition = words?.appearances(at: 1.5)
+        let textPreserved = words?.styledText(at: 1.5)
+            .map { String($0.characters) == "我在海中" } ?? false
+
+        let noTimingPayload = Data(
+            #"{"title":"Test","artist":"Artist","playbackState":"playing","matchStatus":"matched","current":"plain line"}"#.utf8
+        )
+        let noTiming = try? JSONDecoder().decode(PanelMessage.self, from: noTimingPayload)
+
+        let invalidTimingPayload = Data(
+            #"""
+            {
+              "title":"Test",
+              "artist":"Artist",
+              "playbackState":"playing",
+              "matchStatus":"matched",
+              "current":"fallback line",
+              "currentLyric":{
+                "text":"fallback line",
+                "startTime":0,
+                "endTime":2,
+                "words":[{"startTime":0,"endTime":3,"text":"invalid"}]
+              }
+            }
+            """#.utf8
+        )
+        let invalidTiming = try? JSONDecoder().decode(
+            PanelMessage.self,
+            from: invalidTimingPayload
+        )
+        let mismatchedWordsPayload = Data(
+            #"""
+            {
+              "text":"complete original line",
+              "startTime":0,
+              "endTime":2,
+              "words":[{"startTime":0,"endTime":1,"text":"different"}]
+            }
+            """#.utf8
+        )
+        let mismatchedWords = try? JSONDecoder().decode(
+            CurrentLyric.self,
+            from: mismatchedWordsPayload
+        )
+
+        return [
+            "wordTimingDecode": words?.words?.count == 4,
+            "wordTimingPlayback": atPlayback == [.completed, .current, .upcoming, .upcoming],
+            "wordTimingSeek": afterSeek == [.completed, .completed, .current, .upcoming],
+            "wordTimingPauseResume": pausedAtSamePosition == atPlayback
+                && afterResume == [.completed, .completed, .completed, .current],
+            "wordTimingPreservesLineText": textPreserved,
+            "missingTimingFallback": noTiming?.current == "plain line"
+                && noTiming?.currentLyric == nil,
+            "invalidTimingFallback": invalidTiming?.current == "fallback line"
+                && invalidTiming?.currentLyric?.words == nil,
+            "wordTextMismatchFallback": mismatchedWords?.styledText(at: 0.5) == nil
+                && mismatchedWords?.text == "complete original line",
+            "noLyricsState": PanelMessage.empty.current == nil
+                && PanelMessage.empty.currentLyric == nil,
+        ]
     }
 }
 
