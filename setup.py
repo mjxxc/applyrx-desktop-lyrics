@@ -20,6 +20,8 @@ DATA_FILES = [
     "applyrx_state.py",
     "main.py",
     "apple_music_ttml.py",
+    # Imported by applyrx_ui at startup for the Apple Music lifecycle linkage.
+    "apple_music_watcher.py",
     ("native", [str(NATIVE_PANEL)]),
 ]
 OPTIONS = {
