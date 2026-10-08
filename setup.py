@@ -35,7 +35,6 @@ OPTIONS = {
         "certifi",
         "charset_normalizer",
         "idna",
-        "PIL",
     ],
     "includes": [
         "PyObjCTools.AppHelper",
