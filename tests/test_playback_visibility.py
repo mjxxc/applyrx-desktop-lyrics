@@ -272,5 +272,118 @@ class NativePanelStartupTests(unittest.TestCase):
             delegate._startNativePanel(panel_visible=False)
 
 
+class PanelStateConsistencyTests(unittest.TestCase):
+    """CONFIG["desktop_visible"] is intent, not fact — guard against drift.
+
+    The Swift panel owns its own hot key and changes visibility without asking
+    first, so the host's idea of "visible" can be stale. These tests pin the rule
+    that the *panel's* state decides whether a show/hide still has to happen.
+    """
+
+    def setUp(self):
+        applyrx_ui.CONFIG = dict(applyrx_ui.DEFAULT_CONFIG)
+        self.delegate = applyrx_ui.AppDelegate.alloc().init()
+        self.delegate.window = MagicMock()
+        self.delegate.refreshMenu = MagicMock()
+        self.delegate.desktop_hidden_manually = False
+        self.delegate._resetPlaybackState()
+        self.calls = []
+
+        def record(visible, manual=False):
+            self.calls.append(bool(visible))
+            applyrx_ui.CONFIG["desktop_visible"] = bool(visible)
+
+        self.delegate._setDesktopLyricsVisible = record
+
+        # The real handler hops to the main queue, which never drains without a
+        # run loop. Running the block inline keeps these tests on the actual
+        # code path instead of asserting against a stub.
+        import Foundation
+
+        class ImmediateQueue:
+            @staticmethod
+            def addOperationWithBlock_(block):
+                block()
+
+        patcher = patch.object(Foundation, "NSOperationQueue", ImmediateQueue)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tearDown(self):
+        applyrx_ui.CONFIG = dict(applyrx_ui.DEFAULT_CONFIG)
+
+    def _attach_running_bridge(self, panel_visible):
+        from lyrics_panel_bridge import PanelBridge
+
+        bridge = PanelBridge()
+        bridge.adopt_panel_visible(panel_visible)
+        # Pretend the child process is alive so is_running is True.
+        process = MagicMock()
+        process.poll.return_value = None
+        bridge.process = process
+        self.delegate.native_panel_bridge = bridge
+        return bridge
+
+    def test_python_visible_but_panel_hidden_and_playing_shows(self):
+        """Python thinks visible, panel is actually hidden, Music playing.
+
+        The stale Python flag must not suppress the SHOW.
+        """
+        applyrx_ui.CONFIG["desktop_visible"] = True
+        self._attach_running_bridge(panel_visible=False)
+
+        self.delegate._syncPlaybackVisibility(player("playing"))
+
+        self.assertIn(True, self.calls, "panel was hidden but no SHOW was issued")
+        self.assertEqual(applyrx_ui.CONFIG["desktop_visible"], True)
+
+    def test_python_hidden_but_panel_visible_and_paused_hides(self):
+        """Python thinks hidden, panel is actually visible, Music paused."""
+        applyrx_ui.CONFIG["desktop_visible"] = False
+        self._attach_running_bridge(panel_visible=True)
+
+        with patch.object(applyrx_ui, "PAUSE_HIDE_DEBOUNCE", 0.0), \
+             patch("applyrx_ui.time.monotonic", side_effect=[10.0, 11.0]):
+            self.delegate._syncPlaybackVisibility(player("paused"))
+            self.delegate._syncPlaybackVisibility(player("paused"))
+
+        self.assertIn(False, self.calls, "panel was visible but no HIDE was issued")
+        self.assertEqual(applyrx_ui.CONFIG["desktop_visible"], False)
+
+    def test_panel_event_true_syncs_python(self):
+        """Swift reports visible=true -> host CONFIG follows."""
+        applyrx_ui.CONFIG["desktop_visible"] = False
+        applyrx_ui._handle_panel_event(self.delegate, {
+            "event": "visibilityChanged", "visible": True,
+        })
+        self.assertTrue(applyrx_ui.CONFIG["desktop_visible"])
+
+    def test_panel_event_false_syncs_python(self):
+        """Swift reports visible=false -> host CONFIG follows."""
+        applyrx_ui.CONFIG["desktop_visible"] = True
+        applyrx_ui._handle_panel_event(self.delegate, {
+            "event": "visibilityChanged", "visible": False,
+        })
+        self.assertFalse(applyrx_ui.CONFIG["desktop_visible"])
+
+    def test_panel_event_also_updates_bridge(self):
+        """The bridge is the source of truth, so it must hear the same news."""
+        bridge = self._attach_running_bridge(panel_visible=False)
+        applyrx_ui._handle_panel_event(self.delegate, {
+            "event": "visibilityChanged", "visible": True,
+        })
+        self.assertTrue(bridge.panel_visible)
+
+    def test_actual_visibility_prefers_bridge_over_config(self):
+        self._attach_running_bridge(panel_visible=False)
+        applyrx_ui.CONFIG["desktop_visible"] = True
+        self.assertFalse(self.delegate._actualPanelVisible())
+
+    def test_actual_visibility_falls_back_to_config_without_panel(self):
+        self.delegate.native_panel_bridge = None
+        applyrx_ui.CONFIG["desktop_visible"] = True
+        self.assertTrue(self.delegate._actualPanelVisible())
+
+
 if __name__ == "__main__":
     unittest.main()

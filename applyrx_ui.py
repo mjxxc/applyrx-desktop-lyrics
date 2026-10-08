@@ -903,6 +903,22 @@ class AppDelegate(NSObject):
 
     # ── playback-aware visibility ───────────────────────────────
 
+    def _actualPanelVisible(self):
+        """Return the panel's real visibility, or None when unknown.
+
+        ``CONFIG["desktop_visible"]`` records what the host *asked for*, which
+        can drift from the panel: the Swift side owns its own hot key and
+        changes visibility without telling us first. When the native panel is
+        attached, its own view of the world is authoritative; CONFIG is only a
+        fallback for the AppKit fallback window.
+        """
+        bridge = self.native_panel_bridge
+        if bridge is not None and bridge.is_running:
+            visible = bridge.panel_visible
+            if visible is not None:
+                return bool(visible)
+        return bool(CONFIG["desktop_visible"])
+
     def _syncPlaybackVisibility(self, *args):
         """Show the lyrics while Apple Music plays and hide them while paused.
 
@@ -945,7 +961,7 @@ class AppDelegate(NSObject):
             if self._paused_since is not None:
                 log("playback resumed before debounce: keeping lyrics visible")
                 self._paused_since = None
-            if not self.desktop_hidden_manually and not bool(CONFIG["desktop_visible"]):
+            if not self.desktop_hidden_manually and not self._actualPanelVisible():
                 self._setDesktopLyricsVisible(True)
             return
 
@@ -964,7 +980,7 @@ class AppDelegate(NSObject):
         if now - self._paused_since < PAUSE_HIDE_DEBOUNCE:
             return
         # Already hidden for this pause; nothing left to do.
-        if not bool(CONFIG["desktop_visible"]):
+        if not self._actualPanelVisible():
             self._paused_since = None
             return
         # Hiding is an automatic consequence of pausing, never a manual choice,
@@ -1281,6 +1297,11 @@ def _handle_panel_event(delegate, event):
         try:
             CONFIG["desktop_visible"] = visible
             save_config()
+            # Keep the bridge's view in step too, since _actualPanelVisible()
+            # treats it as the source of truth while the panel is attached.
+            bridge = delegate.native_panel_bridge
+            if bridge is not None:
+                bridge.adopt_panel_visible(visible)
             # The user pressed the hot key, so this is an explicit choice and
             # must win over the Apple Music auto-show.
             delegate.desktop_hidden_manually = not visible
