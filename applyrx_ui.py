@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import traceback
+from functools import partial
 from pathlib import Path
 
 
@@ -78,6 +79,7 @@ from Foundation import NSMutableAttributedString, NSObject, NSMakeRange, NSTimer
 from PyObjCTools import AppHelper
 
 import main as core
+from apple_music_watcher import AppleMusicWatcher
 from lyrics_panel_bridge import PanelBridge
 
 
@@ -108,6 +110,8 @@ DEFAULT_CONFIG = {
     "desktop_visible": True,
     "desktop_click_through": True,
     "menubar_lyrics_visible": True,
+    "auto_show_with_music": True,
+    "auto_hide_with_music": True,
 }
 CONFIG = dict(DEFAULT_CONFIG)
 APP_DELEGATE = None
@@ -461,10 +465,17 @@ class AppDelegate(NSObject):
     drag_menu_item = None
     lyrics_window_menu_item = None
     launch_at_login_menu_item = None
+    auto_show_menu_item = None
+    auto_hide_menu_item = None
     drag_unlock_timer = None
     desktop_click_through = True
     lyrics_window = None
     native_panel_bridge = None
+    music_watcher = None
+    # Session-only flag: never persisted to CONFIG. Tracks whether the user
+    # explicitly hid the panel during this Applyrx session, so the Apple Music
+    # auto-show does not fight a deliberate manual choice.
+    desktop_hidden_manually = False
     last_key = None
     lines = None
     meta = None
@@ -533,6 +544,24 @@ class AppDelegate(NSObject):
             True,
         )
         self.timer.fire()
+        self._startMusicWatcher()
+
+    def _startMusicWatcher(self):
+        """Begin watching the Apple Music lifecycle (idempotent)."""
+        if self.music_watcher is None:
+            self.music_watcher = AppleMusicWatcher(
+                on_music_launched=self._onMusicLaunched,
+                on_music_terminated=self._onMusicTerminated,
+            )
+        if self.music_watcher.is_running:
+            return
+        try:
+            self.music_watcher.start()
+            log("apple music watcher started")
+        except Exception:
+            # Lifecycle linkage is an enhancement; never block app startup on it.
+            log("apple music watcher failed:\n" + traceback.format_exc())
+            self.music_watcher = None
 
     def makeStatusItem(self):
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NS_VARIABLE_STATUS_ITEM_LENGTH)
@@ -627,6 +656,24 @@ class AppDelegate(NSObject):
 
         menu.addItem_(NSMenuItem.separatorItem())
 
+        self.auto_show_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "✓ 随 Apple Music 自动显示" if bool(CONFIG["auto_show_with_music"]) else "随 Apple Music 自动显示",
+            "toggleAutoShowWithMusic:",
+            "",
+        )
+        self.auto_show_menu_item.setTarget_(self)
+        menu.addItem_(self.auto_show_menu_item)
+
+        self.auto_hide_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "✓ 随 Apple Music 关闭自动隐藏" if bool(CONFIG["auto_hide_with_music"]) else "随 Apple Music 关闭自动隐藏",
+            "toggleAutoHideWithMusic:",
+            "",
+        )
+        self.auto_hide_menu_item.setTarget_(self)
+        menu.addItem_(self.auto_hide_menu_item)
+
+        menu.addItem_(NSMenuItem.separatorItem())
+
         self.launch_at_login_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "✓ 开机自启动" if self._is_login_item() else "开机自启动",
             "toggleLaunchAtLogin:", ""
@@ -641,6 +688,8 @@ class AppDelegate(NSObject):
 
     def _startNativePanel(self):
         try:
+            if self.native_panel_bridge is not None and self.native_panel_bridge.on_event is None:
+                self.native_panel_bridge.on_event = self._panelEventSink()
             self.native_panel_bridge.start()
             if self.window is not None:
                 self.window.orderOut_(None)
@@ -653,6 +702,15 @@ class AppDelegate(NSObject):
             if self.window is not None and bool(CONFIG["desktop_visible"]):
                 self.window.orderFrontRegardless()
             return False
+
+    def _panelEventSink(self):
+        """Return a zero-argument callback for the panel bridge.
+
+        The bridge calls ``callback(event)``, but PyObjC rejects one-argument
+        methods on this class, so the payload is bound here with functools.partial
+        and handed over as a plain callable object.
+        """
+        return partial(_handle_panel_event, self)
 
     def refreshMenu(self):
         if self.desktop_menu_item is not None:
@@ -672,6 +730,14 @@ class AppDelegate(NSObject):
         if self.lyrics_window_menu_item is not None:
             visible = self.lyrics_window is not None and self.lyrics_window.isVisible()
             self.lyrics_window_menu_item.setTitle_("隐藏完整歌词窗口" if visible else "打开完整歌词窗口")
+        if self.auto_show_menu_item is not None:
+            self.auto_show_menu_item.setTitle_(
+                "✓ 随 Apple Music 自动显示" if bool(CONFIG["auto_show_with_music"]) else "随 Apple Music 自动显示"
+            )
+        if self.auto_hide_menu_item is not None:
+            self.auto_hide_menu_item.setTitle_(
+                "✓ 随 Apple Music 关闭自动隐藏" if bool(CONFIG["auto_hide_with_music"]) else "随 Apple Music 关闭自动隐藏"
+            )
 
     def _desktopFrame(self):
         screen = NSScreen.mainScreen().visibleFrame()
@@ -742,13 +808,41 @@ class AppDelegate(NSObject):
             )
 
     def toggleDesktopLyrics_(self, sender):
-        CONFIG["desktop_visible"] = not bool(CONFIG["desktop_visible"])
+        self._setDesktopLyricsVisible(
+            not bool(CONFIG["desktop_visible"]), True
+        )
+
+    def _setDesktopLyricsVisible(self, *args):
+        """Single entry point for showing/hiding the desktop lyrics.
+
+        Called as ``_setDesktopLyricsVisible(visible[, manual])``. Every caller
+        (menu, hot key, Apple Music lifecycle) funnels through here so the panel
+        is never started twice and the manual-override flag stays consistent with
+        what the user currently sees.
+
+        ``*args`` is required: PyObjC publishes every method to the ObjC runtime
+        and rejects any signature it cannot map to a selector, which rules out
+        ordinary optional parameters.
+        """
+        visible = bool(args[0]) if len(args) > 0 else False
+        manual = bool(args[1]) if len(args) > 1 else False
+        current = bool(CONFIG["desktop_visible"])
+        if visible == current:
+            # Already in the requested state. Still record the manual intent so a
+            # redundant toggle cannot leave the flag contradicting the panel.
+            if manual:
+                self.desktop_hidden_manually = not visible
+            self.refreshMenu()
+            return
+
+        CONFIG["desktop_visible"] = visible
         save_config()
-        if bool(CONFIG["desktop_visible"]):
+        if visible:
             if self.native_panel_bridge is not None and self.native_panel_bridge.is_running:
                 self.native_panel_bridge.set_panel_visible(True)
             elif not self._startNativePanel():
-                self.window.orderFrontRegardless()
+                if self.window is not None:
+                    self.window.orderFrontRegardless()
         else:
             if self.native_panel_bridge is not None and self.native_panel_bridge.is_running:
                 self.native_panel_bridge.set_panel_visible(False)
@@ -756,6 +850,66 @@ class AppDelegate(NSObject):
                 self.native_panel_bridge.stop()
             if self.window is not None:
                 self.window.orderOut_(None)
+
+        if manual:
+            self.desktop_hidden_manually = not visible
+        self.refreshMenu()
+
+    # ── Apple Music lifecycle ──────────────────────────────────
+
+    def _onMusicLaunched(self):
+        """Auto-show the desktop lyrics when Apple Music starts.
+
+        Deliberately does *not* read playback state. Music needs a moment to
+        populate its player, and the existing ``tick_`` loop already retries and
+        surfaces "Apple Music 未在运行"/"正在匹配…" states safely, so waiting here
+        would only duplicate logic.
+        """
+        try:
+            if not bool(CONFIG["auto_show_with_music"]):
+                return
+            if self.desktop_hidden_manually:
+                log("music launched: desktop lyrics stay hidden (manual override)")
+                return
+            log("music launched: showing desktop lyrics")
+            self._setDesktopLyricsVisible(True)
+        except Exception:
+            log("onMusicLaunched error:\n" + traceback.format_exc())
+
+    def _onMusicTerminated(self):
+        """Auto-hide the desktop lyrics when Apple Music quits.
+
+        Applyrx itself always stays resident in the menu bar; only the lyrics
+        panel is hidden. The manual-override flag is cleared so the next Music
+        launch auto-shows again.
+        """
+        try:
+            self.desktop_hidden_manually = False
+            if not bool(CONFIG["auto_hide_with_music"]):
+                return
+            log("music terminated: hiding desktop lyrics (applyrx stays resident)")
+            self._setDesktopLyricsVisible(False)
+        except Exception:
+            log("onMusicTerminated error:\n" + traceback.format_exc())
+
+    def toggleAutoShowWithMusic_(self, sender):
+        CONFIG["auto_show_with_music"] = not bool(CONFIG["auto_show_with_music"])
+        save_config()
+        log(f"auto_show_with_music: {bool(CONFIG['auto_show_with_music'])}")
+        # Turning the option on while Music is already running should take effect
+        # immediately, exactly like the launch notification would have.
+        if bool(CONFIG["auto_show_with_music"]) and not self.desktop_hidden_manually:
+            try:
+                if self.music_watcher is not None and self.music_watcher.is_music_running():
+                    self._setDesktopLyricsVisible(True)
+            except Exception:
+                log("auto show apply error:\n" + traceback.format_exc())
+        self.refreshMenu()
+
+    def toggleAutoHideWithMusic_(self, sender):
+        CONFIG["auto_hide_with_music"] = not bool(CONFIG["auto_hide_with_music"])
+        save_config()
+        log(f"auto_hide_with_music: {bool(CONFIG['auto_hide_with_music'])}")
         self.refreshMenu()
 
     def openSettings_(self, sender):
@@ -933,6 +1087,53 @@ class AppDelegate(NSObject):
     def applicationWillTerminate_(self, notification):
         if self.native_panel_bridge is not None:
             self.native_panel_bridge.stop()
+        if self.music_watcher is not None:
+            try:
+                self.music_watcher.stop()
+            except Exception:
+                log("watcher stop error:\n" + traceback.format_exc())
+            self.music_watcher = None
+
+
+def _handle_panel_event(delegate, event):
+    """Handle user-initiated actions reported by the native panel.
+
+    The panel owns its own hot keys, so a ⌃⌥⌘L toggle happens entirely in the
+    child process. Without this bridge the host would keep a stale
+    ``desktop_visible`` and could skip the very command that should re-show the
+    panel. Lives at module scope so PyObjC does not try to publish it as an ObjC
+    method, and hops to the main queue because the bridge reads it off-thread.
+    """
+    if delegate is None:
+        return
+    if not isinstance(event, dict) or event.get("event") != "visibilityChanged":
+        return
+    visible = bool(event.get("visible"))
+
+    def apply() -> None:
+        try:
+            CONFIG["desktop_visible"] = visible
+            save_config()
+            # The user pressed the hot key, so this is an explicit choice and
+            # must win over the Apple Music auto-show.
+            delegate.desktop_hidden_manually = not visible
+            log(f"panel visibility from hotkey: {visible}")
+            delegate.refreshMenu()
+        except Exception:
+            log("panel event error:\n" + traceback.format_exc())
+
+    try:
+        from Foundation import NSOperationQueue
+
+        NSOperationQueue.mainQueue().addOperationWithBlock_(apply)
+    except Exception:
+        apply()
+
+
+# ``_panelEventSink`` gives the bridge a zero-argument callable, so PyObjC never
+# sees a one-argument method on AppDelegate and the class still defines cleanly.
+def _make_panel_event_sink(delegate):
+    return delegate._panelEventSink()
 
 
 def main():

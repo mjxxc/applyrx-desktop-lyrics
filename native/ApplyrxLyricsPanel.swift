@@ -1187,11 +1187,26 @@ private final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelega
             } else {
                 panel.orderFrontRegardless()
             }
+            emitEvent([
+                "event": "visibilityChanged",
+                "visible": panel.isVisible,
+            ])
         case 2:
             setMoveMode(!model.moveMode)
         default:
             break
         }
+    }
+
+    /// Report a user-initiated visibility change back to the Python host.
+    ///
+    /// The host owns CONFIG and drives Apple Music auto-show, so it must learn
+    /// about hot-key toggles; otherwise it would believe the panel is still
+    /// visible and skip the very command that should re-show it.
+    private func emitEvent(_ payload: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let line = String(data: data, encoding: .utf8) else { return }
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
     }
 
     private func setMoveMode(_ enabled: Bool) {

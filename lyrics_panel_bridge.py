@@ -142,6 +142,22 @@ def find_panel_executable(explicit: Optional[Path] = None) -> Path:
     )
 
 
+def parse_panel_event(line: bytes) -> Optional[dict]:
+    """Parse one JSON event line emitted by the native panel on stdout.
+
+    The panel only writes here for user-initiated actions (currently the
+    visibility hot key). Returns None for blank/unparsable input so a stray
+    line can never break the reader loop.
+    """
+    if not line:
+        return None
+    try:
+        payload = json.loads(line.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 class PanelBridge:
     """Own the native panel process and feed it authoritative manager snapshots."""
 
@@ -152,14 +168,17 @@ class PanelBridge:
         provider=None,
         watcher=None,
         manager_factory=None,
+        on_event=None,
     ):
         self.executable = executable
         self.interval = max(0.1, interval)
         self.provider = provider
         self.watcher = watcher
         self.manager_factory = manager_factory
+        self.on_event = on_event
         self.process: Optional[subprocess.Popen] = None
         self.thread: Optional[threading.Thread] = None
+        self.event_thread: Optional[threading.Thread] = None
         self.stop_event = threading.Event()
         self._control_lock = threading.Lock()
         self._panel_visible = True
@@ -187,7 +206,7 @@ class PanelBridge:
         self.process = subprocess.Popen(
             arguments,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             bufsize=0,
         )
@@ -197,6 +216,13 @@ class PanelBridge:
             daemon=True,
         )
         self.thread.start()
+        if self.process.stdout is not None:
+            self.event_thread = threading.Thread(
+                target=self._read_events,
+                name="applyrx-panel-events",
+                daemon=True,
+            )
+            self.event_thread.start()
 
     def set_panel_visible(self, visible: bool) -> None:
         with self._control_lock:
@@ -221,8 +247,51 @@ class PanelBridge:
                 process.wait(timeout=2)
         if self.thread is not None and self.thread is not threading.current_thread():
             self.thread.join(timeout=2)
+        if self.event_thread is not None and self.event_thread is not threading.current_thread():
+            self.event_thread.join(timeout=2)
         self.process = None
         self.thread = None
+        self.event_thread = None
+
+    def _read_events(self) -> None:
+        """Relay native panel events (e.g. hot-key visibility) to the host.
+
+        Runs on its own thread because the panel writes these lines from its
+        main thread; callbacks are expected to marshal to the UI thread.
+        """
+        process = self.process
+        if process is None or process.stdout is None:
+            return
+        stream = process.stdout
+        buffer = b""
+        try:
+            while not self.stop_event.is_set():
+                chunk = stream.read(1)
+                if not chunk:
+                    return
+                if chunk == b"\n":
+                    line, buffer = buffer, b""
+                    event = parse_panel_event(line)
+                    if event is not None:
+                        self._dispatch_event(event)
+                else:
+                    buffer += chunk
+        except (OSError, ValueError):
+            return
+        finally:
+            line, buffer = buffer, b""
+            event = parse_panel_event(line)
+            if event is not None:
+                self._dispatch_event(event)
+
+    def _dispatch_event(self, event: dict) -> None:
+        callback = self.on_event
+        if callback is None:
+            return
+        try:
+            callback(event)
+        except Exception:
+            return
 
     def _feed_snapshots(self) -> None:
         provider = self.provider or AppleMusicCacheProvider()
