@@ -112,9 +112,21 @@ DEFAULT_CONFIG = {
     "menubar_lyrics_visible": True,
     "auto_show_with_music": True,
     "auto_hide_with_music": True,
+    "auto_show_while_playing": True,
 }
 CONFIG = dict(DEFAULT_CONFIG)
 APP_DELEGATE = None
+
+# Seconds a pause must persist before the lyrics are hidden. Apple Music flips
+# to paused for a moment on some operations (seek, queue advance), so hiding on
+# the first sample would make the panel flicker.
+PAUSE_HIDE_DEBOUNCE = 0.4
+
+# How often playback state is sampled while the native panel owns the window.
+# The panel bridge already polls Apple Music on its own 250ms cadence; this keeps
+# the visibility rule in step with that instead of hammering osascript from the
+# 0.12s UI timer.
+_PLAYBACK_POLL_INTERVAL = 0.25
 
 
 def log(message: str) -> None:
@@ -467,6 +479,7 @@ class AppDelegate(NSObject):
     launch_at_login_menu_item = None
     auto_show_menu_item = None
     auto_hide_menu_item = None
+    playback_menu_item = None
     drag_unlock_timer = None
     desktop_click_through = True
     lyrics_window = None
@@ -476,6 +489,12 @@ class AppDelegate(NSObject):
     # explicitly hid the panel during this Applyrx session, so the Apple Music
     # auto-show does not fight a deliberate manual choice.
     desktop_hidden_manually = False
+    # Playback-aware lyrics state. ``_paused_since`` holds the monotonic timestamp
+    # of the first paused sample so a short pause can be cancelled before hiding;
+    # ``_last_playback_state`` lets us ignore repeat samples of the same state.
+    _paused_since = None
+    _last_playback_state = None
+    _playback_sync_at = 0.0
     last_key = None
     lines = None
     meta = None
@@ -530,12 +549,20 @@ class AppDelegate(NSObject):
 
         self.view = FloatingLyricsView.alloc().initWithFrame_(NSMakeRect(0, 0, frame.size.width, frame.size.height))
         self.window.setContentView_(self.view)
-        if bool(CONFIG["desktop_visible"]):
-            self.window.orderFrontRegardless()
+
+        # v0.2.2: startup no longer trusts the saved visibility on its own.
+        # Music is often already open but paused, and the panel must not appear
+        # then, so it starts hidden and the first playback sample in tick_ decides
+        # whether to show it. The panel process itself is still started so the
+        # hot keys and settings keep working while hidden.
+        CONFIG["desktop_visible"] = False
+        self.desktop_hidden_manually = False
 
         self.makeStatusItem()
-        if bool(CONFIG["desktop_visible"]):
-            self._startNativePanel()
+        self._resetPlaybackState()
+        # Positional argument on purpose: PyObjC maps this method to a selector
+        # that takes a single value, so a keyword would be rejected at runtime.
+        self._startNativePanel(False)
         self.timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.12,
             self,
@@ -672,6 +699,14 @@ class AppDelegate(NSObject):
         self.auto_hide_menu_item.setTarget_(self)
         menu.addItem_(self.auto_hide_menu_item)
 
+        self.playback_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "✓ 播放时显示、暂停时隐藏" if bool(CONFIG["auto_show_while_playing"]) else "播放时显示、暂停时隐藏",
+            "toggleAutoShowWhilePlaying:",
+            "",
+        )
+        self.playback_menu_item.setTarget_(self)
+        menu.addItem_(self.playback_menu_item)
+
         menu.addItem_(NSMenuItem.separatorItem())
 
         self.launch_at_login_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -686,16 +721,23 @@ class AppDelegate(NSObject):
         menu.addItem_(quit_item)
         self.status_item.setMenu_(menu)
 
-    def _startNativePanel(self):
+    def _startNativePanel(self, *args):
+        """Start the native panel process.
+
+        Accepts an optional ``panel_visible`` argument so startup can bring the
+        panel up already hidden; the hot keys and settings remain available
+        either way.
+        """
+        panel_visible = bool(args[0]) if args else True
         try:
             if self.native_panel_bridge is not None and self.native_panel_bridge.on_event is None:
                 self.native_panel_bridge.on_event = self._panelEventSink()
-            self.native_panel_bridge.start()
+            self.native_panel_bridge.start(panel_visible=panel_visible)
             if self.window is not None:
                 self.window.orderOut_(None)
             if self.lyrics_window is not None:
                 self.lyrics_window.close()
-            log("SwiftUI lyrics panel started")
+            log(f"SwiftUI lyrics panel started (visible={panel_visible})")
             return True
         except Exception as exc:
             log(f"SwiftUI lyrics panel unavailable: {exc}")
@@ -737,6 +779,10 @@ class AppDelegate(NSObject):
         if self.auto_hide_menu_item is not None:
             self.auto_hide_menu_item.setTitle_(
                 "✓ 随 Apple Music 关闭自动隐藏" if bool(CONFIG["auto_hide_with_music"]) else "随 Apple Music 关闭自动隐藏"
+            )
+        if self.playback_menu_item is not None:
+            self.playback_menu_item.setTitle_(
+                "✓ 播放时显示、暂停时隐藏" if bool(CONFIG["auto_show_while_playing"]) else "播放时显示、暂停时隐藏"
             )
 
     def _desktopFrame(self):
@@ -855,15 +901,93 @@ class AppDelegate(NSObject):
             self.desktop_hidden_manually = not visible
         self.refreshMenu()
 
+    # ── playback-aware visibility ───────────────────────────────
+
+    def _syncPlaybackVisibility(self, *args):
+        """Show the lyrics while Apple Music plays and hide them while paused.
+
+        Called from ``tick_`` with the player snapshot, so it deliberately sits
+        before the native-panel early return: when the Swift panel owns the
+        window, ``tick_`` skips lyric rendering but still has to keep the
+        visibility rule running.
+
+        The decision order is: the manual override wins, then the playback state.
+        A pause is debounced through ``PAUSE_HIDE_DEBOUNCE`` so the brief paused
+        samples Apple Music emits during a seek or queue change cannot make the
+        panel flicker. Resuming playback always shows immediately.
+
+        Lyrics *matching* is deliberately not consulted — a track without lyrics
+        is still a playing track, and that case is handled by the normal
+        "no lyrics" path rather than by hiding the window.
+        """
+        player = args[0] if args else None
+        if not isinstance(player, dict):
+            return
+        now = time.monotonic()
+
+        if not player.get("running"):
+            # Not running is handled by the lifecycle watcher; just reset so a
+            # later pause does not inherit a stale timestamp.
+            self._resetPlaybackState()
+            return
+
+        state = player.get("state")
+        playing = state == "playing"
+
+        if state != self._last_playback_state:
+            self._last_playback_state = state
+            if playing:
+                self._paused_since = None
+            elif state == "paused":
+                self._paused_since = now
+
+        if playing:
+            if self._paused_since is not None:
+                log("playback resumed before debounce: keeping lyrics visible")
+                self._paused_since = None
+            if not self.desktop_hidden_manually and not bool(CONFIG["desktop_visible"]):
+                self._setDesktopLyricsVisible(True)
+            return
+
+        if state != "paused":
+            # "stopped" or an unknown state: nothing to do here. The existing
+            # render path already reports未在播放 for those.
+            return
+
+        if not bool(CONFIG["auto_show_while_playing"]):
+            return
+
+        # Debounce: only hide once the pause has lasted long enough.
+        if self._paused_since is None:
+            self._paused_since = now
+            return
+        if now - self._paused_since < PAUSE_HIDE_DEBOUNCE:
+            return
+        # Already hidden for this pause; nothing left to do.
+        if not bool(CONFIG["desktop_visible"]):
+            self._paused_since = None
+            return
+        # Hiding is an automatic consequence of pausing, never a manual choice,
+        # so it must not overwrite the manual-override flag.
+        self._setDesktopLyricsVisible(False)
+        self._paused_since = None
+
+    def _resetPlaybackState(self):
+        """Clear playback tracking so a new session starts from a clean slate."""
+        self._paused_since = None
+        self._last_playback_state = None
+        self._playback_sync_at = 0.0
+
     # ── Apple Music lifecycle ──────────────────────────────────
 
     def _onMusicLaunched(self):
-        """Auto-show the desktop lyrics when Apple Music starts.
+        """React to Apple Music starting.
 
-        Deliberately does *not* read playback state. Music needs a moment to
-        populate its player, and the existing ``tick_`` loop already retries and
-        surfaces "Apple Music 未在运行"/"正在匹配…" states safely, so waiting here
-        would only duplicate logic.
+        v0.2.1 showed the lyrics straight away; v0.2.2 must not, because Music
+        may open paused. The decision is therefore left to the playback rule in
+        ``tick_``, which shows only once the player actually reports "playing".
+        A failure to read the player here is not fatal either — the next tick
+        retries.
         """
         try:
             if not bool(CONFIG["auto_show_with_music"]):
@@ -871,8 +995,8 @@ class AppDelegate(NSObject):
             if self.desktop_hidden_manually:
                 log("music launched: desktop lyrics stay hidden (manual override)")
                 return
-            log("music launched: showing desktop lyrics")
-            self._setDesktopLyricsVisible(True)
+            self._resetPlaybackState()
+            log("music launched: waiting for playback state")
         except Exception:
             log("onMusicLaunched error:\n" + traceback.format_exc())
 
@@ -880,11 +1004,12 @@ class AppDelegate(NSObject):
         """Auto-hide the desktop lyrics when Apple Music quits.
 
         Applyrx itself always stays resident in the menu bar; only the lyrics
-        panel is hidden. The manual-override flag is cleared so the next Music
-        launch auto-shows again.
+        panel is hidden. Both the manual-override flag and the playback debounce
+        are cleared so the next Music session starts from a clean slate.
         """
         try:
             self.desktop_hidden_manually = False
+            self._resetPlaybackState()
             if not bool(CONFIG["auto_hide_with_music"]):
                 return
             log("music terminated: hiding desktop lyrics (applyrx stays resident)")
@@ -896,12 +1021,15 @@ class AppDelegate(NSObject):
         CONFIG["auto_show_with_music"] = not bool(CONFIG["auto_show_with_music"])
         save_config()
         log(f"auto_show_with_music: {bool(CONFIG['auto_show_with_music'])}")
-        # Turning the option on while Music is already running should take effect
-        # immediately, exactly like the launch notification would have.
+        # Turning the option on while Music is already playing should take effect
+        # immediately, but only when something is actually playing; otherwise the
+        # playback rule in tick_ will show it as soon as playback starts.
         if bool(CONFIG["auto_show_with_music"]) and not self.desktop_hidden_manually:
             try:
-                if self.music_watcher is not None and self.music_watcher.is_music_running():
-                    self._setDesktopLyricsVisible(True)
+                if (self.music_watcher is not None
+                        and self.music_watcher.is_music_running()):
+                    self._resetPlaybackState()
+                    self._syncPlaybackVisibility(core.get_player_info())
             except Exception:
                 log("auto show apply error:\n" + traceback.format_exc())
         self.refreshMenu()
@@ -910,6 +1038,20 @@ class AppDelegate(NSObject):
         CONFIG["auto_hide_with_music"] = not bool(CONFIG["auto_hide_with_music"])
         save_config()
         log(f"auto_hide_with_music: {bool(CONFIG['auto_hide_with_music'])}")
+        self.refreshMenu()
+
+    def toggleAutoShowWhilePlaying_(self, sender):
+        CONFIG["auto_show_while_playing"] = not bool(CONFIG["auto_show_while_playing"])
+        save_config()
+        log(f"auto_show_while_playing: {bool(CONFIG['auto_show_while_playing'])}")
+        # Enabling the rule while a track is already playing should show the
+        # lyrics right away; disabling it should stop enforcing the pause rule.
+        try:
+            self._resetPlaybackState()
+            if bool(CONFIG["auto_show_while_playing"]) and not self.desktop_hidden_manually:
+                self._syncPlaybackVisibility(self.player or core.get_player_info())
+        except Exception:
+            log("auto playback apply error:\n" + traceback.format_exc())
         self.refreshMenu()
 
     def openSettings_(self, sender):
@@ -1032,14 +1174,38 @@ class AppDelegate(NSObject):
             else:
                 self.status_item.button().setTitle_("applyrx")
 
+    def _pollPlaybackWhileNativePanelRuns(self):
+        """Keep the playback rule alive while the Swift panel owns the window.
+
+        ``tick_`` returns early in that mode, so playback state is sampled here
+        instead. Sampling is throttled to ``_PLAYBACK_POLL_INTERVAL`` to match the
+        cost of the AppleScript call rather than the 0.12s timer, and it reuses
+        ``get_player_info()`` exactly like the rest of the app — no new poller.
+        """
+        now = time.monotonic()
+        if now - self._playback_sync_at < _PLAYBACK_POLL_INTERVAL:
+            return
+        self._playback_sync_at = now
+        try:
+            player = core.get_player_info()
+        except Exception:
+            return
+        self.player = player
+        self._syncPlaybackVisibility(player)
+
     def tick_(self, timer):
         try:
             if (self.native_panel_bridge is not None
                     and self.native_panel_bridge.is_running):
+                # The native panel renders the lyrics itself, but the playback
+                # rule still has to run here: while the panel is up, this is the
+                # only place that learns whether Music is playing or paused.
+                self._pollPlaybackWhileNativePanelRuns()
                 return
             now = time.monotonic()
             if self.lines and self.player and now - self.last_full_check_at < 1.0:
                 self._render_state(self._effective_player(self.player, now))
+                self._syncPlaybackVisibility(self.player)
                 return
 
             self.last_full_check_at = now
@@ -1047,6 +1213,7 @@ class AppDelegate(NSObject):
             self.player = player
             self.anchor_position = float(player.get("position") or 0)
             self.anchor_monotonic = now
+            self._syncPlaybackVisibility(player)
 
             if not player.get("running"):
                 self.lines = []
