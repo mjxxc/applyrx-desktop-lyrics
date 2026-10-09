@@ -224,12 +224,34 @@ class PanelBridge:
             )
             self.event_thread.start()
 
+    @property
+    def panel_visible(self) -> Optional[bool]:
+        """The visibility last requested of the native panel.
+
+        This is the authoritative state as far as the host is concerned: it is
+        what the panel was last told to do, and the panel only ever changes
+        visibility in response to that instruction or to its own hot key (which
+        is reported back through ``on_event``). ``None`` when no panel is
+        attached, so callers can tell "unknown" from "hidden".
+        """
+        with self._control_lock:
+            return self._panel_visible
+
     def set_panel_visible(self, visible: bool) -> None:
         with self._control_lock:
             visible = bool(visible)
             if self._panel_visible != visible:
                 self._panel_visible = visible
                 self._panel_visibility_pending = True
+
+    def adopt_panel_visible(self, visible: bool) -> None:
+        """Record a visibility the panel reported on its own (hot key).
+
+        No pending flag is set: the panel has already applied this state, so
+        re-sending the command would be redundant.
+        """
+        with self._control_lock:
+            self._panel_visible = bool(visible)
 
     def request_settings(self) -> None:
         with self._control_lock:
