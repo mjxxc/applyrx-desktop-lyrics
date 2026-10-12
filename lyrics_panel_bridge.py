@@ -106,6 +106,10 @@ def presentation_state(state: ManagerState) -> dict:
         "next": next_line.text if next_line else None,
         "nextLines": next_lines,
         "message": state.message,
+        # Finer than matchStatus: which of the known failure modes actually
+        # applied, so the panel can say "the cache has no entry for this song"
+        # instead of a blanket "no lyrics". None whenever lyrics were found.
+        "failureReason": state.failureReason,
     }
 
 

@@ -6,12 +6,15 @@ import gzip
 import io
 import json
 import math
+import os
 import re
 import sqlite3
 import subprocess
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass
+from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, Tuple, Union
 from xml.etree import ElementTree as ET
@@ -70,22 +73,49 @@ class CurrentTrack:
 TrackMetadata = CurrentTrack
 
 
+class FailureReason(str, Enum):
+    """Why a lookup did not produce lyrics.
+
+    Every failure the user can hit maps onto exactly one of these, so the panel
+    can say what is actually wrong instead of a single "no lyrics found".
+    Values are the stable strings shared by the GUI and the CLI diagnostics.
+    """
+
+    AUTOMATION_PERMISSION = "automationPermission"
+    TRACK_METADATA_INCOMPLETE = "trackMetadataIncomplete"
+    TRACK_NOT_UNIQUE = "trackNotUnique"
+    CACHE_MISSING_SONG = "cacheMissingSong"
+    CACHE_STALE_INDEX = "cacheStaleIndex"
+    CACHE_UNREADABLE = "cacheUnreadable"
+    CANDIDATE_CONFLICT = "candidateConflict"
+    NO_SYLLABLE_RELATIONSHIP = "noSyllableRelationship"
+    TTML_INVALID = "ttmlInvalid"
+    MULTIPLE_VARIANTS = "multipleVariants"
+
+
 @dataclass(frozen=True)
 class NotFound:
     message: str
+    reason: FailureReason = FailureReason.CACHE_MISSING_SONG
+    detail: str = ""
 
 
 @dataclass(frozen=True)
 class Ambiguous:
     message: str
+    reason: FailureReason = FailureReason.CANDIDATE_CONFLICT
+    detail: str = ""
 
 
 @dataclass(frozen=True)
 class InvalidMatch:
     message: str
+    reason: FailureReason = FailureReason.TRACK_METADATA_INCOMPLETE
+    detail: str = ""
 
 
 ProviderResult = Union[Lyrics, NotFound, Ambiguous, InvalidMatch]
+
 
 
 class LyricsProvider(Protocol):
@@ -117,6 +147,31 @@ class CacheResponse:
     requestedSongIds: frozenset
     payload: Any
 
+    def with_song_ids(self, ids: Iterable[str]) -> "CacheResponse":
+        """Return a copy whose requested-song set includes ids from the body.
+
+        Music omits the song id from the request URL when it already knows the
+        song, so the URL alone cannot tell us which catalogue entry a response
+        belongs to. The id in the response body is authoritative, and the matcher
+        needs it to keep a candidate tied to the request that produced it.
+        """
+        collected = frozenset(
+            str(value) for value in ids
+            if isinstance(value, (str, int)) and re.fullmatch(r"\d{6,}", str(value))
+        )
+        if not collected:
+            return self
+        merged = self.requestedSongIds | collected
+        if merged == self.requestedSongIds:
+            return self
+        return CacheResponse(
+            endpoint=self.endpoint,
+            storefront=self.storefront,
+            parameterNames=self.parameterNames,
+            requestedSongIds=merged,
+            payload=self.payload,
+        )
+
 
 @dataclass(frozen=True)
 class CachedLyrics:
@@ -135,6 +190,76 @@ class CatalogSong:
     lyrics: Tuple[CachedLyrics, ...]
 
 
+@dataclass(frozen=True)
+class CacheFingerprint:
+    """Cheap, read-only signature of the Apple Music cache on disk.
+
+    Three inputs decide whether a cached scan is still valid:
+
+    ``database``
+        size and modification time of ``Cache.db``.
+    ``wal``
+        size and modification time of ``Cache.db-wal``. SQLite readers see
+        committed WAL pages, so a lyric written just now may exist only there.
+    ``bodies``
+        the newest modification time and the file count of ``fsCachedData``,
+        where Music stores response bodies that are too large for the database.
+    """
+
+    database: Tuple[int, int]
+    wal: Tuple[int, int]
+    bodies: Tuple[int, int]
+    missing: bool = False
+
+    @classmethod
+    def of(cls, cache_db: Path) -> "CacheFingerprint":
+        try:
+            database = _file_signature(cache_db)
+        except OSError:
+            database = (0, 0)
+        wal_path = cache_db.with_name(cache_db.name + "-wal")
+        try:
+            wal = _file_signature(wal_path)
+        except OSError:
+            wal = (0, 0)
+        bodies = _directory_signature(cache_db.parent / "fsCachedData")
+        return cls(database=database, wal=wal, bodies=bodies,
+                   missing=not cache_db.is_file())
+
+
+def _file_signature(path: Path) -> Tuple[int, int]:
+    """Return ``(size, mtime_ns)``; a missing file reads as ``(0, 0)``."""
+    try:
+        status = path.stat()
+    except OSError:
+        return (0, 0)
+    return (status.st_size, status.st_mtime_ns)
+
+
+def _directory_signature(directory: Path) -> Tuple[int, int]:
+    """Return ``(newest mtime_ns, file count)`` for a directory.
+
+    Only the count and the newest timestamp are needed: a body being added or
+    rewritten always raises one of them, and walking the directory is far cheaper
+    than decoding the cached payloads.
+    """
+    newest = 0
+    count = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if not entry.is_file():
+                        continue
+                    newest = max(newest, entry.stat().st_mtime_ns)
+                except OSError:
+                    continue
+                count += 1
+    except OSError:
+        return (0, 0)
+    return (newest, count)
+
+
 class CacheScanner:
     """Read catalog-song responses and fsCachedData blobs without writing."""
 
@@ -144,10 +269,57 @@ class CacheScanner:
         re.IGNORECASE,
     )
 
-    def __init__(self, cache_db: Path = DEFAULT_CACHE_DB):
+    def __init__(self, cache_db: Path = DEFAULT_CACHE_DB) -> None:
         self.cache_db = Path(cache_db)
+        # Memoised scan keyed on a fingerprint of every file that can change the
+        # result. Decoding all cached bodies costs ~180ms, so a miss retried a few
+        # seconds later must not pay that again while the cache is untouched.
+        self._cached_fingerprint: Optional[CacheFingerprint] = None
+        self._cached_responses: Optional[List["CacheResponse"]] = None
+        self.scan_count = 0
+        self.cache_hits = 0
+
+    # ── fingerprint ──────────────────────────────────────────
+
+    def fingerprint(self) -> CacheFingerprint:
+        """Describe the on-disk state that decides whether a rescan is needed.
+
+        The database alone is not enough. Music writes through a WAL, and a
+        freshly fetched lyric body usually lands in fsCachedData, so all three
+        have to agree before a cached result may be reused.
+        """
+        return CacheFingerprint.of(self.cache_db)
 
     def scan(self) -> List[CacheResponse]:
+        """Return the catalogue-song responses that request syllable lyrics.
+
+        Results are memoised against :meth:`fingerprint`; a repeat call while
+        neither the database, its WAL, nor the on-disk body directory has changed
+        returns the previous list without touching the disk again.
+        """
+        fingerprint = self.fingerprint()
+        if (
+            self._cached_responses is not None
+            and self._cached_fingerprint is not None
+            and self._cached_fingerprint == fingerprint
+        ):
+            self.cache_hits += 1
+            return self._cached_responses
+
+        responses = self._scan_uncached()
+        self.scan_count += 1
+        # Assign only once the scan fully succeeded, so a failed pass keeps
+        # retrying instead of caching an empty result as if it were truth.
+        self._cached_responses = responses
+        self._cached_fingerprint = fingerprint
+        return responses
+
+    def invalidate(self) -> None:
+        """Drop the memoised scan so the next call reads from disk again."""
+        self._cached_responses = None
+        self._cached_fingerprint = None
+
+    def _scan_uncached(self) -> List[CacheResponse]:
         if not self.cache_db.is_file():
             raise CacheUnavailable("Apple Music cache database is unavailable.")
 
@@ -230,6 +402,10 @@ class CacheScanner:
         for key in ("ids[songs]", "id", "ids"):
             for value in query.get(key, []):
                 ids.update(re.findall(r"(?<!\d)\d{6,}(?!\d)", value))
+        # Music does not always name the song in the URL: a request may carry
+        # only `l[lyrics]` plus `omit[resource]=autos`, leaving no id here at all.
+        # The authoritative id then lives in the response body, and the parser
+        # backfills it via CacheResponse.with_song_ids.
         return {
             "endpoint": "/v1/catalog/{}/songs".format(match.group(1)),
             "storefront": match.group(1),
@@ -322,15 +498,26 @@ class CatalogResponseParser:
         return value if isinstance(value, str) and value.strip() else None
 
     @staticmethod
-    def _song_resources(value: Any) -> Iterable[Dict[str, Any]]:
-        if isinstance(value, dict):
-            if value.get("type") == "songs":
-                yield value
-            for child in value.values():
-                yield from CatalogResponseParser._song_resources(child)
-        elif isinstance(value, list):
-            for child in value:
-                yield from CatalogResponseParser._song_resources(child)
+    def _song_resources(payload: Any) -> Iterable[Dict[str, Any]]:
+        """Yield the song resources that carry a usable ``attributes`` block.
+
+        Only the JSON:API ``data`` array and the top level of ``included`` are
+        visited. An earlier version walked the whole document, which also turned
+        up the bare references under ``meta.filters.equivalents``: entries with
+        an ``id`` but no attributes, for the same song. Those produced an
+        attribute-less duplicate of every real song and, should Apple ever list
+        genuinely different editions there, a ready-made source of mismatches.
+        """
+        for container in _payload_resource_containers(payload):
+            for entry in container:
+                if not isinstance(entry, dict) or entry.get("type") != "songs":
+                    continue
+                attributes = entry.get("attributes")
+                # A resource without attributes is a link, not a song we can
+                # match or read lyrics from.
+                if not isinstance(attributes, dict) or not attributes:
+                    continue
+                yield entry
 
     def _related_lyrics(self, resource: Dict[str, Any]) -> Iterable[CachedLyrics]:
         relationships = resource.get("relationships")
@@ -705,7 +892,10 @@ class TrackMatcher:
             )
         if not self._valid_track(track):
             return self._finish(
-                InvalidMatch("Current track metadata is incomplete or invalid.")
+                InvalidMatch(
+            "Current track metadata is incomplete or invalid.",
+            FailureReason.TRACK_METADATA_INCOMPLETE,
+        )
             )
 
         grouped: Dict[str, List[CatalogSong]] = {}
@@ -765,7 +955,10 @@ class TrackMatcher:
 
         if request_conflict:
             return self._finish(
-                InvalidMatch("Cached request IDs conflict with the current track.")
+                InvalidMatch(
+                "Cached request IDs conflict with the current track.",
+                FailureReason.CACHE_MISSING_SONG,
+            )
             )
         if track.catalogId:
             if track.catalogId in conflicting_ids:
@@ -784,7 +977,10 @@ class TrackMatcher:
                     "Cached metadata matches a different catalog ID than the requested one."
                 ))
             return self._finish(
-                NotFound("No complete cached song matches the requested catalog ID.")
+                NotFound(
+                "No complete cached song matches the requested catalog ID.",
+                FailureReason.CACHE_MISSING_SONG,
+            )
             )
 
         matching_ids = set(matched_by_id)
@@ -794,13 +990,19 @@ class TrackMatcher:
             )
         if len(matching_ids) > 1:
             return self._finish(
-                Ambiguous("Multiple cached catalog IDs match the current track.")
+                Ambiguous(
+                "Multiple cached catalog IDs match the current track.",
+                FailureReason.TRACK_NOT_UNIQUE,
+            )
             )
         if matching_ids:
             catalog_id = next(iter(matching_ids))
             return self._finish(self._select_best(matched_by_id[catalog_id]))
 
-        return self._finish(NotFound("No cached song resource matches the current track."))
+        return self._finish(NotFound(
+                "No cached song resource matches the current track.",
+                FailureReason.CACHE_MISSING_SONG,
+            ))
 
     def _set_diagnostics(
         self,
@@ -917,12 +1119,53 @@ class TrackMatcher:
         )
 
 
+def _payload_resource_containers(payload: Any) -> List[List[Any]]:
+    """Return the JSON:API arrays that legitimately hold song resources.
+
+    ``data`` carries the songs that were asked for; ``included`` carries
+    side-loaded resources. Nothing else in the document describes a song.
+    """
+    if not isinstance(payload, dict):
+        return []
+    containers: List[List[Any]] = []
+    for key in ("data", "included"):
+        value = payload.get(key)
+        if isinstance(value, list):
+            containers.append(value)
+    return containers
+
+
+@lru_cache(maxsize=4096)
 def normalize_text(value: Optional[str]) -> str:
+    """Fold a metadata string down to a comparable form.
+
+    The matcher calls this for the same handful of titles and artists on
+    every poll, and each call runs a translation table, an NFKC pass and a
+    regex, so results are memoised. Inputs come from the cache, and the cap
+    keeps the memo bounded regardless of how long the session runs.
+    """
     if not isinstance(value, str):
         return ""
     simplified = value.translate(METADATA_TRANSLATION)
     simplified = unicodedata.normalize("NFKC", simplified).casefold().strip()
     return re.sub(r"[\s\-_·・'’\"“”()\[\]（）。,.，:：!！?？]+", "", simplified)
+
+
+def _scanner_fingerprint(scanner: Any) -> Optional[CacheFingerprint]:
+    """Return the scanner's fingerprint, or None when it does not expose one.
+
+    A caller may substitute a scanner that knows nothing about the cache file;
+    memoisation is then simply skipped instead of being keyed on a value that
+    would never change.
+    """
+    getter = getattr(scanner, "fingerprint", None)
+    if not callable(getter):
+        return None
+    try:
+        fingerprint = getter()
+    except Exception:
+        return None
+    return fingerprint if isinstance(fingerprint, CacheFingerprint) else None
 
 
 class AppleMusicCacheProvider:
@@ -937,37 +1180,105 @@ class AppleMusicCacheProvider:
         self.catalog_parser = catalog_parser or CatalogResponseParser()
         self.ttml_parser = ttml_parser or TTMLParser()
         self.matcher = matcher or TrackMatcher()
+        # Parsing walks every cached response, so it is memoised on the same
+        # fingerprint the scanner uses. A retry that finds the cache unchanged
+        # then costs a dict lookup instead of another pass over all songs.
+        self._parsed_fingerprint: Optional[CacheFingerprint] = None
+        self._parsed_songs: Optional[List[List[CatalogSong]]] = None
+        self._indexed_responses: Optional[List[CacheResponse]] = None
+        self.parse_count = 0
+        self.index_hits = 0
+
+    def _scan_and_parse(self):
+        """Return ``(responses, songs_by_response)`` reusing cached parsing.
+
+        The id backfill is folded into the same memoised step, so callers never
+        see a response whose ``requestedSongIds`` still lacks what its body
+        proved.
+
+        Reuse is keyed on the scanner's fingerprint when it offers one. A
+        substitute scanner may not, and then nothing is memoised: parsing stays
+        correct, just not accelerated. Guessing a key would risk serving stale
+        songs, which is worse than re-parsing.
+        """
+        responses = self.scanner.scan()
+        fingerprint = _scanner_fingerprint(self.scanner)
+        if (
+            fingerprint is not None
+            and self._parsed_songs is not None
+            and self._parsed_fingerprint is not None
+            and self._parsed_fingerprint == fingerprint
+            and self._indexed_responses is not None
+        ):
+            self.index_hits += 1
+            return self._indexed_responses, self._parsed_songs
+
+        parsed = [self.catalog_parser.parse(response) for response in responses]
+        indexed = [
+            response.with_song_ids(song.catalogId for song in songs)
+            for response, songs in zip(responses, parsed)
+        ]
+        self.parse_count += 1
+        self._parsed_fingerprint = fingerprint
+        self._parsed_songs = parsed
+        self._indexed_responses = indexed
+        return indexed, parsed
 
     def get_lyrics(self, track: CurrentTrack) -> ProviderResult:
         try:
-            responses = self.scanner.scan()
+            responses, parsed_songs = self._scan_and_parse()
+        except CacheUnavailable as exc:
+            return NotFound(
+                str(exc), FailureReason.CACHE_UNREADABLE, detail=type(exc).__name__
+            )
+        except CacheReadError as exc:
+            return NotFound(
+                str(exc), FailureReason.CACHE_UNREADABLE, detail=type(exc).__name__
+            )
         except ProviderError as exc:
-            return NotFound(str(exc))
-        parsed_songs = [self.catalog_parser.parse(response) for response in responses]
+            return NotFound(
+                str(exc), FailureReason.CACHE_UNREADABLE, detail=type(exc).__name__
+            )
         matched = self.matcher.match(track, responses, parsed_songs)
         if isinstance(matched, (NotFound, Ambiguous, InvalidMatch)):
             return matched
         if not matched.lyrics:
-            return NotFound("The matched catalog song has no cached syllable lyrics.")
+            return NotFound(
+                "The matched catalog song has no cached syllable lyrics.",
+                FailureReason.NO_SYLLABLE_RELATIONSHIP,
+                detail="matched " + matched.catalogId,
+            )
 
         parsed_variants = []
+        invalid_ttml = 0
         for cached_lyrics in matched.lyrics:
             if cached_lyrics.catalogId != matched.catalogId:
                 return InvalidMatch(
-                    "Syllable-lyrics catalog ID is missing or conflicts with its parent song."
+                    "Syllable-lyrics catalog ID is missing or conflicts with its parent song.",
+                    FailureReason.NO_SYLLABLE_RELATIONSHIP,
+                    detail="matched " + matched.catalogId,
                 )
             try:
                 parsed = self.ttml_parser.parse(cached_lyrics.ttml, cached_lyrics.language)
             except TTMLParseError:
+                invalid_ttml += 1
                 continue
             parsed_variants.append(parsed)
         unique_variants = {
             (lyrics.language, lyrics.lines): lyrics for lyrics in parsed_variants
         }
         if not unique_variants:
-            return NotFound("The matched catalog song has no parseable timed TTML lyrics.")
+            return NotFound(
+                "The matched catalog song has no parseable timed TTML lyrics.",
+                FailureReason.TTML_INVALID,
+                detail="{} lyric documents failed to parse".format(invalid_ttml),
+            )
         if len(unique_variants) > 1:
-            return Ambiguous("Multiple distinct TTML lyric variants are cached for this song.")
+            return Ambiguous(
+                "Multiple distinct TTML lyric variants are cached for this song.",
+                FailureReason.MULTIPLE_VARIANTS,
+                detail="{} distinct variants".format(len(unique_variants)),
+            )
         selected = next(iter(unique_variants.values()))
         return Lyrics(
             lines=selected.lines,
