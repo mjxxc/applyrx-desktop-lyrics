@@ -857,13 +857,93 @@ class ProviderFailureReasonTests(unittest.TestCase):
         self.assertEqual(manager.failureReason, "providerError")
         self.assertNotEqual(manager.failureReason, "trackMetadataIncomplete")
 
-    def test_exception_detail_does_not_leak_the_message(self):
+    def test_exception_message_never_reaches_the_user(self):
+        """A raising provider must not push its message into anything shown.
+
+        The exception text can hold paths, ids or credentials, so the host keeps
+        only the exception class name. This checks every surface the user or the
+        panel can see, not just the reason enum — asserting on the reason alone
+        proved nothing, because an enum value can never contain the message.
+        """
+        secret = "secret token abc123"
+
         class Exploding:
             def get_lyrics(self, track):
-                raise RuntimeError("secret token abc123")
+                raise RuntimeError(secret)
 
         manager = self._drive(self._manager(Exploding()))
-        self.assertNotIn("abc123", str(manager.failureReason))
+
+        self.assertNotIn(secret, str(manager.message))
+        self.assertNotIn(secret, str(manager.failureReason))
+        self.assertNotIn(secret, str(manager.matchStatus))
+        self.assertEqual(manager.failureReason, "providerError")
+        self.assertEqual(manager.matchStatus, "invalid")
+
+        from lyrics_panel_bridge import presentation_state
+
+        state = manager.update(PlaybackSnapshot(
+            track=manager.currentTrack,
+            position=0.0,
+            playbackState="playing",
+            sampledAt=0.0,
+            trackChanged=False,
+            stateChanged=False,
+            positionChanged=False,
+            seeked=False,
+            positionAvailable=True,
+            error=None,
+            positionHeld=False,
+        ))
+        payload = presentation_state(state)
+        rendered = " ".join(str(value) for value in payload.values())
+        self.assertNotIn(secret, rendered)
+        self.assertEqual(payload["failureReason"], "providerError")
+
+    def test_exception_detail_keeps_only_the_class_name(self):
+        """The detail the host records must name the type, not quote it.
+
+        The result is intercepted on its way into ``_apply_result`` so the
+        assertion covers what the production path actually builds. Constructing
+        an InvalidMatch here instead would only test the constructor, and would
+        still pass if the handler started storing the message.
+        """
+        secret = "secret token abc123"
+        captured = []
+
+        class Exploding:
+            def get_lyrics(self, track):
+                raise RuntimeError(secret)
+
+        manager = self._manager(Exploding())
+        original = manager._apply_result
+
+        def spy(result, generation, key):
+            captured.append(result)
+            return original(result, generation, key)
+
+        manager._apply_result = spy
+        manager.currentTrack = self._track()
+        manager.currentKey = ("Song", "Artist", "Album", 200.0, "123456")
+        manager.update(PlaybackSnapshot(
+            track=manager.currentTrack,
+            position=0.0,
+            playbackState="playing",
+            sampledAt=0.0,
+            trackChanged=True,
+            stateChanged=True,
+            positionChanged=False,
+            seeked=False,
+            positionAvailable=True,
+            error=None,
+            positionHeld=False,
+        ))
+        manager._resolve_pending()
+
+        self.assertEqual(len(captured), 1)
+        detail = captured[0].detail
+        self.assertEqual(detail, "RuntimeError")
+        self.assertNotIn(secret, str(detail))
+        self.assertNotIn("secret", str(detail))
 
     def test_timeout_is_reported_as_timeout(self):
         clock = FakeClock(0.0)
