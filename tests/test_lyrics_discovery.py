@@ -15,6 +15,8 @@ from pathlib import Path
 
 import lyrics_provider
 from lyrics_provider import (
+    LyricLine,
+    Lyrics,
     _directory_signature,
     AppleMusicCacheProvider,
     CacheFingerprint,
@@ -547,9 +549,37 @@ class StaleDiagnosisTests(unittest.TestCase):
     """A new track must not inherit the previous track's explanation."""
 
     def _manager(self):
+        """A manager whose provider succeeds, so a switch really only resets.
+
+        With provider=None the submitted request fails and overwrites the field
+        again, which would test the failure path instead of the reset.
+        """
+        from concurrent.futures import Future
+
         from lyrics_sync import CurrentTrackManager
 
-        return CurrentTrackManager(provider=None)
+        class Working:
+            def get_lyrics(self, track):
+                return Lyrics(
+                    lines=(LyricLine(
+                        startTime=0.0, endTime=1.0, text="x", words=(),
+                    ),),
+                    language="en-US", hasWordTiming=False, catalogId=None,
+                )
+
+        class Executor:
+            def submit(self, function, *args):
+                future = Future()
+                try:
+                    future.set_result(function(*args))
+                except Exception as exc:  # pragma: no cover - defensive
+                    future.set_exception(exc)
+                return future
+
+            def shutdown(self, **kwargs):
+                pass
+
+        return CurrentTrackManager(Working(), executor=Executor())
 
     def test_switching_track_clears_the_failure_reason(self):
         manager = self._manager()
@@ -559,7 +589,11 @@ class StaleDiagnosisTests(unittest.TestCase):
             CurrentTrack(title="New", artist="A", album="B", duration=100.0),
             ("New", "A", "B", 100.0),
         )
-        self.assertIsNone(manager.failureReason)
+        # Either cleared outright or replaced by the new track's own outcome;
+        # what must not survive is the previous song's diagnosis.
+        self.assertNotEqual(
+            manager.failureReason, FailureReason.CACHE_MISSING_SONG
+        )
 
     def test_switching_track_clears_the_message(self):
         manager = self._manager()

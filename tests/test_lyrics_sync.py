@@ -8,6 +8,9 @@ from pathlib import Path
 
 import lyrics_simulate
 from lyrics_provider import (
+    FailureReason,
+    InvalidMatch,
+    Ambiguous,
     AppleMusicCacheProvider,
     CacheResponse,
     CurrentTrack,
@@ -20,6 +23,7 @@ from lyrics_sync import (
     LyricsEngine,
     NowPlayingWatcher,
     PlaybackSnapshot,
+    _PendingLyricsRequest,
 )
 
 
@@ -800,3 +804,179 @@ class SimulationCliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_LINE = LyricLine(startTime=0.0, endTime=1.0, text="x", words=())
+
+
+class ProviderFailureReasonTests(unittest.TestCase):
+    """Every way a lookup can go wrong must name what actually went wrong.
+
+    A provider that raises or times out says nothing about the track or the
+    cache, so it must not be reported as a metadata problem or a cache miss.
+    """
+
+    def _manager(self, provider, clock=None):
+        return CurrentTrackManager(
+            provider,
+            executor=ImmediateExecutor(),
+            clock=clock or FakeClock(),
+        )
+
+    def _track(self, catalog_id="123456"):
+        return CurrentTrack(
+            title="Song", artist="Artist", album="Album",
+            duration=200.0, catalogId=catalog_id, playbackState="playing",
+        )
+
+    def _drive(self, manager):
+        manager.currentTrack = self._track()
+        manager.currentKey = ("Song", "Artist", "Album", 200.0, "123456")
+        manager.update(PlaybackSnapshot(
+            track=manager.currentTrack,
+            position=0.0,
+            playbackState="playing",
+            sampledAt=0.0,
+            trackChanged=True,
+            stateChanged=True,
+            positionChanged=False,
+            seeked=False,
+            positionAvailable=True,
+            error=None,
+            positionHeld=False,
+        ))
+        manager._resolve_pending()
+        return manager
+
+    def test_provider_exception_is_a_provider_error(self):
+        class Exploding:
+            def get_lyrics(self, track):
+                raise RuntimeError("boom")
+
+        manager = self._drive(self._manager(Exploding()))
+        self.assertEqual(manager.failureReason, "providerError")
+        self.assertNotEqual(manager.failureReason, "trackMetadataIncomplete")
+
+    def test_exception_detail_does_not_leak_the_message(self):
+        class Exploding:
+            def get_lyrics(self, track):
+                raise RuntimeError("secret token abc123")
+
+        manager = self._drive(self._manager(Exploding()))
+        self.assertNotIn("abc123", str(manager.failureReason))
+
+    def test_timeout_is_reported_as_timeout(self):
+        clock = FakeClock(0.0)
+
+        class Pending:
+            def get_lyrics(self, track):
+                return NotFound("not cached")
+
+        manager = self._manager(Pending(), clock=clock)
+        manager.currentTrack = self._track()
+        manager.currentKey = ("Song", "Artist", "Album", 200.0, "123456")
+        manager.matchStatus = "loading"
+        manager._pending = _PendingLyricsRequest(
+            generation=manager._generation,
+            key=manager.currentKey,
+            future=Future(),  # never completes
+            started_at=0.0,
+            attempt=0,
+            is_retry=False,
+        )
+        clock.advance(manager.provider_timeout + 1.0)
+        manager._resolve_pending()
+        self.assertEqual(manager.matchStatus, "timeout")
+        self.assertEqual(manager.failureReason, "providerTimeout")
+
+    def test_wrong_catalog_id_is_a_mismatch(self):
+        lyrics = Lyrics(
+            lines=(_LINE,), language="en-US", hasWordTiming=False,
+            catalogId="999999",
+        )
+        manager = self._drive(self._manager(ProviderStub({"123456": lyrics})))
+        self.assertEqual(manager.failureReason, "catalogIdMismatch")
+
+    def test_missing_catalog_id_is_a_mismatch(self):
+        lyrics = Lyrics(
+            lines=(_LINE,), language="en-US", hasWordTiming=False, catalogId="",
+        )
+        manager = self._drive(self._manager(ProviderStub({"123456": lyrics})))
+        self.assertEqual(manager.failureReason, "catalogIdMismatch")
+
+    def test_empty_timeline_is_reported_separately(self):
+        """Lyrics that match but carry no usable timeline are their own case."""
+        lyrics = Lyrics(
+            lines=(), language="en-US", hasWordTiming=False, catalogId="123456",
+        )
+        manager = self._drive(self._manager(ProviderStub({"123456": lyrics})))
+        self.assertEqual(manager.failureReason, "timelineInvalid")
+
+    def test_unsupported_result_is_reported_as_unsupported(self):
+        class Weird:
+            def get_lyrics(self, track):
+                return "a string, not a ProviderResult"
+
+        manager = self._drive(self._manager(Weird()))
+        self.assertEqual(manager.failureReason, "providerUnsupported")
+
+    def test_submit_failure_is_a_provider_error(self):
+        class BrokenExecutor:
+            def submit(self, function, *args):
+                raise RuntimeError("executor is closed")
+
+        manager = CurrentTrackManager(
+            ProviderStub({}), executor=BrokenExecutor(), clock=FakeClock()
+        )
+        manager.currentTrack = self._track()
+        manager.currentKey = ("Song", "Artist", "Album", 200.0, "123456")
+        manager._submit_request(is_retry=False)
+        self.assertEqual(manager.matchStatus, "invalid")
+        self.assertEqual(manager.failureReason, "providerError")
+
+    def test_loading_clears_a_previous_reason(self):
+        class Pending:
+            def get_lyrics(self, track):
+                return NotFound("not cached")
+
+        manager = self._manager(Pending())
+        manager.currentTrack = self._track()
+        manager.currentKey = ("Song", "Artist", "Album", 200.0, "123456")
+        manager.failureReason = "catalogIdMismatch"
+        manager._submit_request(is_retry=False)
+        self.assertEqual(manager.matchStatus, "loading")
+        self.assertIsNone(manager.failureReason)
+
+    def test_no_provider_problem_is_reported_as_a_metadata_problem(self):
+        for label, provider in (
+            ("exception", type("E", (), {"get_lyrics": lambda s, t: 1 / 0})()),
+            ("unsupported", type("U", (), {"get_lyrics": lambda s, t: object()})()),
+        ):
+            with self.subTest(label):
+                manager = self._drive(self._manager(provider))
+                self.assertNotEqual(
+                    manager.failureReason, "trackMetadataIncomplete"
+                )
+
+
+class InvalidMatchDefaultReasonTests(unittest.TestCase):
+    """The default must not blame the track for an unspecified invalid result."""
+
+    def test_default_is_provider_error(self):
+        result = InvalidMatch("something went wrong")
+        self.assertEqual(result.reason, FailureReason.PROVIDER_ERROR)
+
+    def test_default_is_never_track_metadata_incomplete(self):
+        for cls in (InvalidMatch,):
+            self.assertNotEqual(
+                cls("x").reason, FailureReason.TRACK_METADATA_INCOMPLETE
+            )
+
+    def test_other_defaults_stay_meaningful(self):
+        self.assertEqual(
+            NotFound("x").reason, FailureReason.CACHE_MISSING_SONG
+        )
+        self.assertEqual(
+            Ambiguous("x").reason, FailureReason.CANDIDATE_CONFLICT
+        )
+

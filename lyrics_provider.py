@@ -92,6 +92,13 @@ class FailureReason(str, Enum):
     NO_SYLLABLE_RELATIONSHIP = "noSyllableRelationship"
     TTML_INVALID = "ttmlInvalid"
     MULTIPLE_VARIANTS = "multipleVariants"
+    # Generic provider-side problems. These exist so a crash or a timeout is
+    # never filed under a category that blames the track or the cache.
+    PROVIDER_ERROR = "providerError"
+    PROVIDER_TIMEOUT = "providerTimeout"
+    PROVIDER_UNSUPPORTED = "providerUnsupported"
+    CATALOG_ID_MISMATCH = "catalogIdMismatch"
+    TIMELINE_INVALID = "timelineInvalid"
 
 
 @dataclass(frozen=True)
@@ -111,7 +118,10 @@ class Ambiguous:
 @dataclass(frozen=True)
 class InvalidMatch:
     message: str
-    reason: FailureReason = FailureReason.TRACK_METADATA_INCOMPLETE
+    # Neutral by design. InvalidMatch covers everything from a provider crash to
+    # a catalogue id that does not line up, so defaulting it to
+    # TRACK_METADATA_INCOMPLETE made an ordinary exception accuse the track.
+    reason: FailureReason = FailureReason.PROVIDER_ERROR
     detail: str = ""
 
 

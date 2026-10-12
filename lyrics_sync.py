@@ -389,9 +389,12 @@ class CurrentTrackManager:
         try:
             future = self.executor.submit(self.provider.get_lyrics, track)
         except Exception:
+            # The request never left the process: an executor problem, not
+            # anything to do with the track or the cache.
             self._next_retry_at = None
             self.matchStatus = "invalid"
             self.message = "Lyrics provider request could not be started."
+            self.failureReason = FailureReason.PROVIDER_ERROR.value
             self._log("[LYRICS] invalid: provider request could not start")
             return
         self._pending = _PendingLyricsRequest(
@@ -405,6 +408,9 @@ class CurrentTrackManager:
         self._next_retry_at = None
         self.matchStatus = "loading"
         self.message = None
+        # Loading clears the diagnosis too: while a retry is in flight the last
+        # reason no longer describes what is happening.
+        self.failureReason = None
         self._log(
             "[LYRICS] request generation={} attempt={}{}".format(
                 generation,
@@ -428,6 +434,8 @@ class CurrentTrackManager:
             self._pending = None
             self.matchStatus = "timeout"
             self.message = "Lyrics provider timed out; no previous lyrics are retained."
+            # The previous song's diagnosis must not explain this timeout.
+            self.failureReason = FailureReason.PROVIDER_TIMEOUT.value
             return
         if not pending.future.done():
             return
@@ -437,8 +445,14 @@ class CurrentTrackManager:
             return
         try:
             result = pending.future.result()
-        except Exception:
-            result = InvalidMatch("Lyrics provider failed.")
+        except Exception as exc:
+            # A provider that raised tells us nothing about the track or the
+            # cache, so it is reported as a provider failure.
+            result = InvalidMatch(
+                "Lyrics provider failed.",
+                FailureReason.PROVIDER_ERROR,
+                detail=type(exc).__name__,
+            )
         self._apply_result(result, pending.generation, pending.key)
 
     def _apply_result(
@@ -459,11 +473,15 @@ class CurrentTrackManager:
                 self.engine.clear()
                 self.matchStatus = "invalid"
                 self.message = "Provider lyrics are missing the requested catalog ID."
+                self.failureReason = FailureReason.CATALOG_ID_MISMATCH.value
                 return
             if not self.engine.set_lyrics(result):
+                # Lyrics arrived and were accepted by the matcher, but the
+                # timeline itself is unusable.
                 self.engine.clear()
                 self.matchStatus = "invalid"
                 self.message = "Lyrics timeline is empty or invalid."
+                self.failureReason = FailureReason.TIMELINE_INVALID.value
                 return
             self.matchStatus = "matched"
             self.currentCatalogId = result.catalogId or (
@@ -506,6 +524,7 @@ class CurrentTrackManager:
             self.engine.clear()
             self.matchStatus = "invalid"
             self.message = "Lyrics provider returned an unsupported result."
+            self.failureReason = FailureReason.PROVIDER_UNSUPPORTED.value
             self._next_retry_at = None
             self._log("[LYRICS] invalid: unsupported provider result")
 
