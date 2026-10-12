@@ -523,7 +523,35 @@ def build_diagnostic(track: Dict[str, Any], cache_data: Dict[str, Any]) -> Dict[
             ),
         },
         "belongs_to_current_song": strict_link,
+        # Same vocabulary the GUI reports, so a user comparing the panel with
+        # this script sees one classification rather than two.
+        "failure_reason": _classify_failure(
+            track, resolution, related_evidence, global_parseable_documents,
+            global_ttml_documents,
+        ),
     }
+
+
+def _classify_failure(track, resolution, related_evidence,
+                      parseable_documents, ttml_documents) -> Optional[str]:
+    """Map the collected evidence onto the provider's failure vocabulary."""
+    if not (track.get("title") and track.get("artist")
+            and track.get("album") and track.get("duration")):
+        return "trackMetadataIncomplete"
+    if resolution != "resolved":
+        # Without a unique catalogue identity the song can be neither confirmed
+        # nor ruled out; that is a matching problem, not a cache problem.
+        return "trackNotUnique"
+    if not related_evidence:
+        return "cacheMissingSong"
+    if not any(item["ttml_document_count"] for item in related_evidence):
+        return "noSyllableRelationship"
+    if ttml_documents and not parseable_documents:
+        return "ttmlInvalid"
+    if parseable_documents:
+        # Lyrics exist for this song, so any remaining failure is downstream.
+        return "cacheStaleIndex"
+    return "cacheMissingSong"
 
 
 def main() -> int:

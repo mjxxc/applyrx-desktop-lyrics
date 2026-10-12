@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Sequence, Tuple, Union
 
 from lyrics_provider import (
+    FailureReason,
     Ambiguous,
     CurrentTrack,
     InvalidMatch,
@@ -48,6 +49,20 @@ class LyricsPosition:
     next: Optional[LyricLine]
 
 
+def _reason_of(result: Any) -> Optional[str]:
+    """Return the provider's stable failure reason, when it carries one.
+
+    Older or custom providers may return plain results without a reason; the
+    state then simply reports none instead of guessing.
+    """
+    reason = getattr(result, "reason", None)
+    if isinstance(reason, FailureReason):
+        return reason.value
+    if isinstance(reason, str) and reason:
+        return reason
+    return None
+
+
 @dataclass(frozen=True)
 class ManagerState:
     snapshot: PlaybackSnapshot
@@ -56,6 +71,7 @@ class ManagerState:
     matchStatus: str
     message: Optional[str]
     catalogId: Optional[str] = None
+    failureReason: Optional[str] = None
 
 
 class Clock(Protocol):
@@ -303,6 +319,7 @@ class CurrentTrackManager:
         self.currentCatalogId: Optional[str] = None
         self.matchStatus = "notFound"
         self.message: Optional[str] = None
+        self.failureReason: Optional[str] = None
         self._generation = 0
         self._pending: Optional[_PendingLyricsRequest] = None
         self._retry_index = 0
@@ -329,6 +346,7 @@ class CurrentTrackManager:
             matchStatus=self.matchStatus,
             message=self.message or snapshot.error,
             catalogId=self.currentCatalogId or (track.catalogId if track else None),
+            failureReason=self.failureReason,
         )
 
     def _switch_track(
@@ -349,6 +367,9 @@ class CurrentTrackManager:
         self.engine.clear()
         self.matchStatus = "notFound"
         self.message = None
+        # Clear the previous song's diagnosis with it. Carrying it over would
+        # have the panel explain a new track using the last one's failure.
+        self.failureReason = None
         self._pending = None
         self._retry_index = 0
         self._next_retry_at = None
@@ -368,9 +389,12 @@ class CurrentTrackManager:
         try:
             future = self.executor.submit(self.provider.get_lyrics, track)
         except Exception:
+            # The request never left the process: an executor problem, not
+            # anything to do with the track or the cache.
             self._next_retry_at = None
             self.matchStatus = "invalid"
             self.message = "Lyrics provider request could not be started."
+            self.failureReason = FailureReason.PROVIDER_ERROR.value
             self._log("[LYRICS] invalid: provider request could not start")
             return
         self._pending = _PendingLyricsRequest(
@@ -384,6 +408,9 @@ class CurrentTrackManager:
         self._next_retry_at = None
         self.matchStatus = "loading"
         self.message = None
+        # Loading clears the diagnosis too: while a retry is in flight the last
+        # reason no longer describes what is happening.
+        self.failureReason = None
         self._log(
             "[LYRICS] request generation={} attempt={}{}".format(
                 generation,
@@ -407,6 +434,8 @@ class CurrentTrackManager:
             self._pending = None
             self.matchStatus = "timeout"
             self.message = "Lyrics provider timed out; no previous lyrics are retained."
+            # The previous song's diagnosis must not explain this timeout.
+            self.failureReason = FailureReason.PROVIDER_TIMEOUT.value
             return
         if not pending.future.done():
             return
@@ -416,8 +445,14 @@ class CurrentTrackManager:
             return
         try:
             result = pending.future.result()
-        except Exception:
-            result = InvalidMatch("Lyrics provider failed.")
+        except Exception as exc:
+            # A provider that raised tells us nothing about the track or the
+            # cache, so it is reported as a provider failure.
+            result = InvalidMatch(
+                "Lyrics provider failed.",
+                FailureReason.PROVIDER_ERROR,
+                detail=type(exc).__name__,
+            )
         self._apply_result(result, pending.generation, pending.key)
 
     def _apply_result(
@@ -438,17 +473,22 @@ class CurrentTrackManager:
                 self.engine.clear()
                 self.matchStatus = "invalid"
                 self.message = "Provider lyrics are missing the requested catalog ID."
+                self.failureReason = FailureReason.CATALOG_ID_MISMATCH.value
                 return
             if not self.engine.set_lyrics(result):
+                # Lyrics arrived and were accepted by the matcher, but the
+                # timeline itself is unusable.
                 self.engine.clear()
                 self.matchStatus = "invalid"
                 self.message = "Lyrics timeline is empty or invalid."
+                self.failureReason = FailureReason.TIMELINE_INVALID.value
                 return
             self.matchStatus = "matched"
             self.currentCatalogId = result.catalogId or (
                 self.currentTrack.catalogId if self.currentTrack else None
             )
             self.message = None
+            self.failureReason = None
             self._next_retry_at = None
             self._retry_index = 0
             self._log(
@@ -460,18 +500,21 @@ class CurrentTrackManager:
             self.engine.clear()
             self.matchStatus = "ambiguous"
             self.message = result.message
+            self.failureReason = _reason_of(result)
             self._next_retry_at = None
             self._log("[LYRICS] ambiguous generation={}".format(generation))
         elif isinstance(result, InvalidMatch):
             self.engine.clear()
             self.matchStatus = "invalid"
             self.message = result.message
+            self.failureReason = _reason_of(result)
             self._next_retry_at = None
             self._log("[LYRICS] invalid generation={}".format(generation))
         elif isinstance(result, NotFound):
             self.engine.clear()
             self.matchStatus = "notFound"
             self.message = result.message
+            self.failureReason = _reason_of(result)
             delay = self._retry_delay()
             self._next_retry_at = self.clock() + delay
             self._retry_index += 1
@@ -481,6 +524,7 @@ class CurrentTrackManager:
             self.engine.clear()
             self.matchStatus = "invalid"
             self.message = "Lyrics provider returned an unsupported result."
+            self.failureReason = FailureReason.PROVIDER_UNSUPPORTED.value
             self._next_retry_at = None
             self._log("[LYRICS] invalid: unsupported provider result")
 
