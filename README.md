@@ -1,6 +1,6 @@
 # Applyrx
 
-**Applyrx v0.2.0 — Native Liquid Glass Lyrics Experience**
+**Applyrx v0.2.3 — Faster Lyrics Discovery & Diagnostics**
 
 Applyrx is an unofficial macOS desktop lyrics overlay for Apple Music. It reads
 timed lyrics from Apple Music's local cache and shows them in a synchronized,
@@ -49,6 +49,8 @@ sponsored by Apple.
   restore window position on launch, and Restore Defaults.
 - Strict track matching: incomplete or conflicting metadata is never guessed;
   a local cache lookup is retried for a track that initially has no match.
+- Reuses parsed cache results while the on-disk cache is unchanged, and provides
+  specific diagnostics for common lyric-discovery failures.
 
 ## Requirements
 
@@ -59,12 +61,11 @@ sponsored by Apple.
 - Apple Music.app with lyrics already present in its local cache. Opening the
   built-in lyrics view in Music may be necessary to populate local cache data.
 - macOS Automation permission for reading the current Apple Music track.
-- Python 3.10 or newer, but **only** when building from source. The v0.2.0
-  release build was produced with Python 3.12.
+- Python 3.10 or newer, but **only** when building from source. The v0.2.3 release build uses Python 3.12.5.
 
 ## Installation
 
-Download the release asset `Applyrx-v0.2.0-macOS.zip` from the GitHub Releases
+Download the release asset `Applyrx-v0.2.3-macOS.zip` from the GitHub Releases
 page, unzip it, and move `Applyrx.app` to your Applications folder (or run it
 from anywhere).
 
@@ -104,8 +105,8 @@ To produce the release archive and its checksum:
 
 ```bash
 ./scripts/release_macos.sh
-# → Applyrx-v0.2.0-macOS.zip
-# → Applyrx-v0.2.0-macOS.zip.sha256
+# → Applyrx-v0.2.3-macOS.zip
+# → Applyrx-v0.2.3-macOS.zip.sha256
 ```
 
 `scripts/release_macos.sh` verifies the version metadata, the minimum system
@@ -257,7 +258,7 @@ window.
 
 ## Release status
 
-- Release asset: `Applyrx-v0.2.0-macOS.zip` with `Applyrx-v0.2.0-macOS.zip.sha256`.
+- Release asset: `Applyrx-v0.2.3-macOS.zip` with `Applyrx-v0.2.3-macOS.zip.sha256`.
 - Signing: ad-hoc (`codesign -s -`), no Developer ID, `TeamIdentifier` not set.
 - Notarization: not notarized.
 - Distribution: GitHub Releases only. There is no App Store release.
