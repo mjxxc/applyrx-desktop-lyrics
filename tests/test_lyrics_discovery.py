@@ -6,6 +6,7 @@ writes to the real cache. SQLite is always opened through the read-only scanner.
 """
 
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import lyrics_provider
 from lyrics_provider import (
+    _directory_signature,
     AppleMusicCacheProvider,
     CacheFingerprint,
     CacheResponse,
@@ -392,6 +394,188 @@ class ParseReuseTests(unittest.TestCase):
         self.cache.add_song("222333", "Another", "Artist", "Album")
         provider.get_lyrics(track)
         self.assertEqual(provider.parse_count, 2)
+
+
+
+class BodyDirectorySignatureTests(unittest.TestCase):
+    """The fingerprint must notice any change to any cached body.
+
+    Counting files and keeping the newest mtime is not sufficient: a body that
+    is not the newest can be rewritten while the count stays put and the new
+    mtime still sorts below the old maximum.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.bodies = Path(self.dir.name) / "fsCachedData"
+        self.bodies.mkdir()
+        now = time.time()
+        for name, age in (("old", 30.0), ("mid", 20.0), ("newest", 0.0)):
+            path = self.bodies / name
+            path.write_bytes(b"x" * 10)
+            stamp = now - age
+            os.utime(path, (stamp, stamp))
+
+    def test_signature_is_stable_when_nothing_changes(self):
+        first = _directory_signature(self.bodies)
+        self.assertEqual(first, _directory_signature(self.bodies))
+        self.assertEqual(first[1], 3)
+
+    def test_rewriting_an_older_body_is_detected(self):
+        before = _directory_signature(self.bodies)
+        path = self.bodies / "old"
+        path.write_bytes(b"y" * 10)
+        # Restore the old timestamp so the newer attributes are what differs.
+        stamp = time.time() - 30.0
+        os.utime(path, (stamp, stamp))
+        self.assertNotEqual(before, _directory_signature(self.bodies))
+
+    def test_equal_count_replacement_is_detected(self):
+        before = _directory_signature(self.bodies)
+        os.remove(self.bodies / "mid")
+        (self.bodies / "fresh").write_bytes(b"z" * 10)
+        after = _directory_signature(self.bodies)
+        self.assertEqual(before[1], after[1], "the count is unchanged on purpose")
+        self.assertNotEqual(before, after)
+
+    def test_same_name_same_size_replacement_is_detected(self):
+        path = self.bodies / "old"
+        before = _directory_signature(self.bodies)
+        os.remove(path)
+        path.write_bytes(b"x" * 10)
+        self.assertNotEqual(before, _directory_signature(self.bodies))
+
+    def test_rename_is_detected(self):
+        before = _directory_signature(self.bodies)
+        os.rename(self.bodies / "mid", self.bodies / "renamed")
+        self.assertNotEqual(before, _directory_signature(self.bodies))
+
+    def test_removal_is_detected(self):
+        before = _directory_signature(self.bodies)
+        os.remove(self.bodies / "mid")
+        self.assertNotEqual(before, _directory_signature(self.bodies))
+
+    def test_missing_directory_yields_an_empty_signature(self):
+        self.assertEqual(
+            _directory_signature(Path(self.dir.name) / "absent"), ("", 0)
+        )
+
+
+class BodyChangeInvalidatesScanTests(unittest.TestCase):
+    """A rewritten body with an unchanged file count must still be rescanned."""
+
+    def setUp(self):
+        self.cache = TempCache()
+        self.addCleanup(self.cache.close)
+
+    def test_rewritten_body_triggers_a_rescan(self):
+        scanner = CacheScanner(self.cache.db)
+        scanner.scan()
+        bodies = self.cache.root / "fsCachedData"
+        # Replace an entry in place, so the file count never changes.
+        target = bodies / "existing"
+        target.write_bytes(b"{}")
+        scanner.scan()
+        settled = scanner.scan_count
+
+        stamp = time.time() - 600.0
+        target.write_bytes(b'{"changed": true}')
+        os.utime(target, (stamp, stamp))
+        scanner.scan()
+        self.assertGreater(scanner.scan_count, settled)
+
+
+class FailureReasonAssignmentTests(unittest.TestCase):
+    """Each matcher branch must report the reason that actually describes it."""
+
+    def setUp(self):
+        self.cache = TempCache()
+        self.addCleanup(self.cache.close)
+        self.cache.add_song("123456", "Song", "Artist", "Album")
+        self.provider = AppleMusicCacheProvider(scanner=CacheScanner(self.cache.db))
+
+    def _reason(self, **kwargs):
+        fields = dict(title="Song", artist="Artist", album="Album", duration=200.0)
+        fields.update(kwargs)
+        return self.provider.get_lyrics(CurrentTrack(**fields)).reason
+
+    def test_incomplete_track_metadata(self):
+        self.assertEqual(
+            self._reason(title=""), FailureReason.TRACK_METADATA_INCOMPLETE
+        )
+
+    def test_no_match_is_a_cache_miss(self):
+        self.assertEqual(
+            self._reason(title="Unrelated"), FailureReason.CACHE_MISSING_SONG
+        )
+
+    def test_metadata_conflict_is_a_candidate_conflict(self):
+        self.assertEqual(
+            self._reason(catalogId="123456", album="Different Album"),
+            FailureReason.CANDIDATE_CONFLICT,
+        )
+
+    def test_unknown_catalog_id_is_refused(self):
+        self.assertEqual(
+            self._reason(catalogId="555555"), FailureReason.CANDIDATE_CONFLICT
+        )
+
+    def test_unreadable_cache(self):
+        provider = AppleMusicCacheProvider(
+            scanner=CacheScanner(self.cache.root / "absent.db")
+        )
+        result = provider.get_lyrics(CurrentTrack(
+            title="Song", artist="Artist", album="Album", duration=200.0))
+        self.assertEqual(result.reason, FailureReason.CACHE_UNREADABLE)
+
+    def test_cache_failures_are_not_reported_as_metadata_problems(self):
+        for kwargs in (
+            {"title": "Unrelated"},
+            {"catalogId": "555555"},
+            {"duration": 999.0},
+            {"album": "Different Album"},
+        ):
+            with self.subTest(**kwargs):
+                self.assertNotEqual(
+                    self._reason(**kwargs), FailureReason.TRACK_METADATA_INCOMPLETE
+                )
+
+
+
+class StaleDiagnosisTests(unittest.TestCase):
+    """A new track must not inherit the previous track's explanation."""
+
+    def _manager(self):
+        from lyrics_sync import CurrentTrackManager
+
+        return CurrentTrackManager(provider=None)
+
+    def test_switching_track_clears_the_failure_reason(self):
+        manager = self._manager()
+        manager.failureReason = FailureReason.CACHE_MISSING_SONG
+        manager.message = "the previous track failed"
+        manager._switch_track(
+            CurrentTrack(title="New", artist="A", album="B", duration=100.0),
+            ("New", "A", "B", 100.0),
+        )
+        self.assertIsNone(manager.failureReason)
+
+    def test_switching_track_clears_the_message(self):
+        manager = self._manager()
+        manager.failureReason = FailureReason.TTML_INVALID
+        manager.message = "the previous track failed"
+        manager._switch_track(
+            CurrentTrack(title="New", artist="A", album="B", duration=100.0),
+            ("New", "A", "B", 100.0),
+        )
+        self.assertNotEqual(manager.message, "the previous track failed")
+
+    def test_reason_helper_accepts_a_plain_result(self):
+        """Providers without a reason must not break the state."""
+        from lyrics_sync import _reason_of
+
+        self.assertIsNone(_reason_of(object()))
 
 
 if __name__ == "__main__":

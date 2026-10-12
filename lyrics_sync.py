@@ -367,6 +367,9 @@ class CurrentTrackManager:
         self.engine.clear()
         self.matchStatus = "notFound"
         self.message = None
+        # Clear the previous song's diagnosis with it. Carrying it over would
+        # have the panel explain a new track using the last one's failure.
+        self.failureReason = None
         self._pending = None
         self._retry_index = 0
         self._next_retry_at = None

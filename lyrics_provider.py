@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import io
 import json
 import math
@@ -202,13 +203,15 @@ class CacheFingerprint:
         size and modification time of ``Cache.db-wal``. SQLite readers see
         committed WAL pages, so a lyric written just now may exist only there.
     ``bodies``
-        the newest modification time and the file count of ``fsCachedData``,
-        where Music stores response bodies that are too large for the database.
+        a digest over every entry in ``fsCachedData`` plus its file count, where
+        Music stores response bodies too large for the database. Each entry
+        contributes name, size, mtime, ctime and inode so that any add, removal
+        or rewrite is noticed.
     """
 
     database: Tuple[int, int]
     wal: Tuple[int, int]
-    bodies: Tuple[int, int]
+    bodies: Tuple[str, int]
     missing: bool = False
 
     @classmethod
@@ -236,28 +239,46 @@ def _file_signature(path: Path) -> Tuple[int, int]:
     return (status.st_size, status.st_mtime_ns)
 
 
-def _directory_signature(directory: Path) -> Tuple[int, int]:
-    """Return ``(newest mtime_ns, file count)`` for a directory.
+def _directory_signature(directory: Path) -> Tuple[str, int]:
+    """Return ``(digest, file count)`` covering every file in a directory.
 
-    Only the count and the newest timestamp are needed: a body being added or
-    rewritten always raises one of them, and walking the directory is far cheaper
-    than decoding the cached payloads.
+    Counting files and taking the newest mtime is not enough: a body other than
+    the newest can be rewritten while the count stays the same and the new mtime
+    still sorts below the old maximum, and the cache would then serve a stale
+    result. Each file therefore contributes its name, size, mtime and ctime, plus
+    the inode so that a delete-and-recreate under the same name — which preserves
+    the name and can preserve the size — still registers as a change. The result
+    is hashed so the fingerprint stays a small comparable value.
+
+    Reading metadata for each file costs well under a millisecond for the ~140
+    bodies Music keeps, against ~190ms to decode them, so the trade buys
+    correctness almost for free.
     """
-    newest = 0
-    count = 0
+    records: List[Tuple[str, int, int, int, int]] = []
     try:
         with os.scandir(directory) as entries:
             for entry in entries:
                 try:
                     if not entry.is_file():
                         continue
-                    newest = max(newest, entry.stat().st_mtime_ns)
+                    status = entry.stat()
                 except OSError:
                     continue
-                count += 1
+                records.append((
+                    entry.name,
+                    status.st_size,
+                    status.st_mtime_ns,
+                    status.st_ctime_ns,
+                    status.st_ino,
+                ))
     except OSError:
-        return (0, 0)
-    return (newest, count)
+        return ("", 0)
+    # Sorting makes the digest independent of the order scandir happens to
+    # return, so a pure reordering is not mistaken for a change.
+    records.sort()
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(repr(records).encode("utf-8", "replace"))
+    return (digest.hexdigest(), len(records))
 
 
 class CacheScanner:
@@ -887,16 +908,17 @@ class TrackMatcher:
         songs_by_response: Sequence[Sequence[CatalogSong]],
     ) -> Union[CatalogSong, NotFound, Ambiguous, InvalidMatch]:
         if len(responses) != len(songs_by_response):
-            return self._finish(
-                InvalidMatch("Cached response parsing is incomplete.")
-            )
+            # The host handed over a response/parse pair that does not line up,
+            # which is a broken cache read rather than a matching outcome.
+            return self._finish(InvalidMatch(
+                "Cached response parsing is incomplete.",
+                FailureReason.CACHE_UNREADABLE,
+            ))
         if not self._valid_track(track):
-            return self._finish(
-                InvalidMatch(
-            "Current track metadata is incomplete or invalid.",
-            FailureReason.TRACK_METADATA_INCOMPLETE,
-        )
-            )
+            return self._finish(InvalidMatch(
+                "Current track metadata is incomplete or invalid.",
+                FailureReason.TRACK_METADATA_INCOMPLETE,
+            ))
 
         grouped: Dict[str, List[CatalogSong]] = {}
         request_conflict = False
@@ -954,27 +976,33 @@ class TrackMatcher:
         )
 
         if request_conflict:
-            return self._finish(
-                InvalidMatch(
+            # The cache holds contradictory evidence about which song was asked
+            # for, so no candidate can be trusted.
+            return self._finish(InvalidMatch(
                 "Cached request IDs conflict with the current track.",
-                FailureReason.CACHE_MISSING_SONG,
-            )
-            )
+                FailureReason.CANDIDATE_CONFLICT,
+            ))
         if track.catalogId:
             if track.catalogId in conflicting_ids:
-                return self._finish(
-                    InvalidMatch("Complete cached metadata conflicts for the requested catalog ID.")
-                )
+                return self._finish(InvalidMatch(
+                    "Complete cached metadata conflicts for the requested catalog ID.",
+                    FailureReason.CANDIDATE_CONFLICT,
+                ))
             matches = matched_by_id.get(track.catalogId, [])
             if matches:
                 return self._finish(self._select_best(matches))
             if any(self._metadata_complete(song) for song in relevant):
-                return self._finish(
-                    InvalidMatch("Cached metadata conflicts for the requested catalog ID.")
-                )
-            if off_id_metadata_matches:
                 return self._finish(InvalidMatch(
-                    "Cached metadata matches a different catalog ID than the requested one."
+                    "Cached metadata conflicts for the requested catalog ID.",
+                    FailureReason.CANDIDATE_CONFLICT,
+                ))
+            if off_id_metadata_matches:
+                # The song is cached, but under a different catalogue id than the
+                # one being played, so treating it as a miss would hide a real
+                # identity problem.
+                return self._finish(InvalidMatch(
+                    "Cached metadata matches a different catalog ID than the requested one.",
+                    FailureReason.CANDIDATE_CONFLICT,
                 ))
             return self._finish(
                 NotFound(
@@ -985,9 +1013,10 @@ class TrackMatcher:
 
         matching_ids = set(matched_by_id)
         if conflicting_ids & matching_ids:
-            return self._finish(
-                InvalidMatch("Complete cached metadata conflicts for a matching catalog ID.")
-            )
+            return self._finish(InvalidMatch(
+                "Complete cached metadata conflicts for a matching catalog ID.",
+                FailureReason.CANDIDATE_CONFLICT,
+            ))
         if len(matching_ids) > 1:
             return self._finish(
                 Ambiguous(
