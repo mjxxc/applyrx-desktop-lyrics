@@ -20,7 +20,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-APP="dist/Applyrx.app"
+# open resolves the bundle by name, so it needs an absolute path here.
+APP="$(pwd)/dist/Applyrx.app"
 PLIST="$APP/Contents/Info.plist"
 NATIVE_PANEL="$APP/Contents/Resources/native/ApplyrxLyricsPanel"
 SMOKE_LOG="$(mktemp -t applyrx-smoke)"
