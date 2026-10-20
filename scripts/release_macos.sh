@@ -130,18 +130,30 @@ PY
 )" || fail "bundled native panel self-test did not pass"
 echo "bundled native panel self-test: $SELF_TEST_RESULT"
 
-"$APP/Contents/MacOS/Applyrx" >"$SMOKE_LOG" 2>&1 &
-APP_PID=$!
-sleep 6
-if ! kill -0 "$APP_PID" 2>/dev/null; then
-  echo "--- app output ---" >&2
-  cat "$SMOKE_LOG" >&2
-  fail "dist/Applyrx.app exited during the launch smoke test"
+# Launched the way a user launches it. Running the binary directly would inherit
+# this shell's locale, which is exactly what hid the startup encoding failure:
+# from Finder the app inherits nothing from launchd, and the panel never came
+# up. Going through open reproduces that path.
+RUNTIME_LOG="$(mktemp -t applyrx-runtime)"
+open -a "$APP" --args
+sleep 8
+RUNTIME_PID="$(pgrep -x Applyrx | head -1)"
+if [[ -z "$RUNTIME_PID" ]]; then
+  echo "--- app log ---" >&2
+  cat /tmp/applyrx.log 2>/dev/null >&2 || true
+  fail "Applyrx did not stay running when launched through Finder"
 fi
-echo "dist/Applyrx.app launched and stayed running (pid $APP_PID)"
-kill "$APP_PID" 2>/dev/null || true
-wait "$APP_PID" 2>/dev/null || true
-pkill -f "dist/Applyrx.app/Contents/Resources/native/ApplyrxLyricsPanel" 2>/dev/null || true
+if ! pgrep -f "ApplyrxLyricsPanel" >/dev/null 2>&1; then
+  echo "--- app log ---" >&2
+  cat /tmp/applyrx.log 2>/dev/null >&2 || true
+  pkill -x Applyrx 2>/dev/null || true
+  fail "the native lyrics panel did not start under a Finder-style launch"
+fi
+echo "Finder-style launch: app and lyrics panel both running (pid $RUNTIME_PID)"
+pkill -x Applyrx 2>/dev/null || true
+sleep 1
+pkill -f "ApplyrxLyricsPanel" 2>/dev/null || true
+rm -f "$RUNTIME_LOG"
 
 echo "== 9. package =="
 VERSION="$SETUP_VERSION"
