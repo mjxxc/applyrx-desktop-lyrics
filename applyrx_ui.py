@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import locale
 import os
 import signal
 import subprocess
@@ -35,6 +36,32 @@ def _find_project_dir(script_dir: Path, is_bundled: bool) -> Path:
 
 if not IS_BUNDLED_APP and VENV_PYTHON.exists() and Path(sys.prefix).resolve() != VENV_DIR.resolve():
     os.execv(str(VENV_PYTHON), [str(VENV_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]])
+
+# A py2app bundle launched from Finder inherits no locale from launchd, so the
+# process starts with the "C" locale and every text read that does not name an
+# encoding decodes as US-ASCII. Track titles and lyrics carry non-ASCII bytes
+# routinely, and that aborted startup before the panel was ever started — the
+# app looked alive while its panel never appeared.
+#
+# Binding "" is not enough on its own: with no LANG set it quietly succeeds at
+# "C" rather than failing, so the ASCII default survives. Hence the explicit
+# list, and hence the override below, which is what actually makes a bare
+# open() read UTF-8.
+for _candidate in ("en_US.UTF-8", "C.UTF-8", "UTF-8", ""):
+    try:
+        locale.setlocale(locale.LC_ALL, _candidate)
+        break
+    except (locale.Error, ValueError):
+        continue
+
+if locale.getpreferredencoding(False).lower().replace("-", "") not in ("utf8",):
+    # Still not UTF-8 — no usable locale was on offer. Report UTF-8 anyway so
+    # default-encoded reads decode song metadata correctly. The OS-level locale
+    # stays as it is; only Python's idea of the default text encoding changes.
+    def _utf8_preferred(_do_setlocale: bool = True) -> str:
+        return "utf-8"
+
+    locale.getpreferredencoding = _utf8_preferred  # type: ignore[assignment]
 
 import objc
 from AppKit import (
