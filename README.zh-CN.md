@@ -1,6 +1,6 @@
 # Applyrx
 
-**Applyrx v0.2.3 —— 歌词发现提速与失败诊断**
+**Applyrx v0.2.4 —— 稳定启动与面板校验**
 
 Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它从 Apple Music
 本地缓存读取带时间戳的歌词，并通过可点击穿透的 Liquid Glass 浮窗及菜单栏显示。
@@ -52,11 +52,11 @@ Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它�
 - 安装 Apple Music.app，且本地缓存中已有该歌曲的歌词。必要时可在 Music 中打开
   内建歌词面板以产生本地缓存。
 - macOS 自动化权限，以便读取 Music.app 当前曲目信息。
-- Python 3.10 或更新版本，但**仅用于从源码构建**。v0.2.3 Release 使用 Python 3.12.5 构建。
+- Python 3.10 或更新版本，但**仅用于从源码构建**。v0.2.4 Release 使用 Python 3.12.5 构建。
 
 ## 安装
 
-从 GitHub Releases 页面下载发布资源 `Applyrx-v0.2.3-macOS.zip`，解压后把
+从 GitHub Releases 页面下载发布资源 `Applyrx-v0.2.4-macOS.zip`，解压后把
 `Applyrx.app` 拖到"应用程序"文件夹（也可以就地运行）。
 
 ### 首次打开
@@ -92,8 +92,8 @@ Python；必要时可通过 `APPLYRX_PYTHON` 指定解释器。
 
 ```bash
 ./scripts/release_macos.sh
-# → Applyrx-v0.2.3-macOS.zip
-# → Applyrx-v0.2.3-macOS.zip.sha256
+# → Applyrx-v0.2.4-macOS.zip
+# → Applyrx-v0.2.4-macOS.zip.sha256
 ```
 
 `scripts/release_macos.sh` 会在打包前校验版本信息、最低系统版本、架构，并确认
@@ -223,7 +223,7 @@ Applyrx 访问 Music.app。更改权限后重启 Applyrx。
 
 ## 发布状态
 
-- 发布资源：`Applyrx-v0.2.3-macOS.zip` 与 `Applyrx-v0.2.3-macOS.zip.sha256`。
+- 发布资源：`Applyrx-v0.2.4-macOS.zip` 与 `Applyrx-v0.2.4-macOS.zip.sha256`。
 - 签名：ad-hoc（`codesign -s -`），无 Developer ID，`TeamIdentifier` 未设置。
 - 公证：未公证。
 - 分发：仅 GitHub Releases，没有 App Store 版本。
