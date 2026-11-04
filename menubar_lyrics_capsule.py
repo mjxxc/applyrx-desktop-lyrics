@@ -46,7 +46,11 @@ from AppKit import (
     NSParagraphStyleAttributeName,
 )
 
-from menubar_lyrics import capsule_copy
+from menubar_lyrics import (
+    DEFAULT_LYRIC_COLOR,
+    capsule_copy,
+    lyric_color_hex,
+)
 
 CAPSULE_HEIGHT = 60.0
 CAPSULE_RADIUS = 30.0
@@ -58,6 +62,24 @@ GAP_BELOW_MENU_BAR = 6.0
 CURRENT_FONT_SIZE = 16.0
 NEXT_FONT_SIZE = 12.0
 NEXT_ALPHA = 0.62
+
+
+def _ns_color(hex_value):
+    value = (hex_value or "#111111").lstrip("#")
+    r = int(value[0:2], 16) / 255.0
+    g = int(value[2:4], 16) / 255.0
+    b = int(value[4:6], 16) / 255.0
+    return NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0)
+
+
+def _luminance(color):
+    try:
+        rgb = color.colorUsingColorSpace_(NSColor.sRGBColorSpace())
+        if rgb is None:
+            return 0.0
+        return 0.299 * rgb.redComponent() + 0.587 * rgb.greenComponent() + 0.114 * rgb.blueComponent()
+    except Exception:
+        return 0.0
 
 
 def status_icon():
@@ -127,25 +149,46 @@ class CapsulePanel:
         self.window.setContentView_(content)
 
         self._paragraph_style = self._make_paragraph_style()
-        self.current_label.setParagraphStyle_(self._paragraph_style) if False else None
+        self._text_color = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.067, 0.067, 0.067, 1.0)
         self._current_shadow = self._make_shadow(0.85)
         self._next_shadow = self._make_shadow(0.75)
-        self._paragraph_style = self._make_paragraph_style()
         self.current_label = self._make_label(CURRENT_FONT_SIZE, NSFontWeightSemibold, 1.0, self._paragraph_style)
         self.next_label = self._make_label(NEXT_FONT_SIZE, NSFontWeightRegular, NEXT_ALPHA, self._paragraph_style)
         content.addSubview_(self.current_label)
         content.addSubview_(self.next_label)
+        self.set_lyrics_color(DEFAULT_LYRIC_COLOR)
         self._layout()
 
     @staticmethod
-    def _make_shadow(alpha):
-        # Black text on clear glass: a light halo keeps it legible when the
-        # window behind is dark, the same trick Finder's desktop labels use.
+    def _make_shadow(alpha, light_text=False):
+        # The halo goes the opposite way to the text so it stays legible on any
+        # backdrop: white text gets a dark halo, dark text a light one.
+        base = NSColor.blackColor() if light_text else NSColor.whiteColor()
         shadow = NSShadow.alloc().init()
-        shadow.setShadowColor_(NSColor.whiteColor().colorWithAlphaComponent_(alpha))
+        shadow.setShadowColor_(base.colorWithAlphaComponent_(alpha))
         shadow.setShadowBlurRadius_(3.5)
         shadow.setShadowOffset_(NSSize(0.0, 1.0))
         return shadow
+
+    def set_lyrics_color(self, value):
+        """Apply one of the menu colours to both rows (halo adapts to it)."""
+        color = _ns_color(lyric_color_hex(value))
+        self._text_color = color
+        light = _luminance(color) > 0.6
+        strength = 0.85 if light else 0.55
+        self._current_shadow = self._make_shadow(strength, light)
+        self._next_shadow = self._make_shadow(strength * 0.9, light)
+        self.current_label.setTextColor_(color.colorWithAlphaComponent_(1.0))
+        self.next_label.setTextColor_(color.colorWithAlphaComponent_(NEXT_ALPHA))
+        self._apply_strings()
+
+    def _apply_strings(self):
+        self.current_label.setAttributedStringValue_(
+            self._attributed(self._current_text, self.current_label, self._current_shadow, self._paragraph_style)
+        )
+        self.next_label.setAttributedStringValue_(
+            self._attributed(self._next_text, self.next_label, self._next_shadow, self._paragraph_style)
+        )
 
     @staticmethod
     def _make_paragraph_style():
@@ -188,12 +231,7 @@ class CapsulePanel:
         if (line1, line2) == (self._current_text, self._next_text):
             return
         self._current_text, self._next_text = line1, line2
-        self.current_label.setAttributedStringValue_(
-            self._attributed(line1, self.current_label, self._current_shadow, self._paragraph_style)
-        )
-        self.next_label.setAttributedStringValue_(
-            self._attributed(line2, self.next_label, self._next_shadow, self._paragraph_style)
-        )
+        self._apply_strings()
         self._layout()
 
     def _layout(self):

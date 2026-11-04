@@ -110,9 +110,11 @@ import main as core
 from apple_music_watcher import AppleMusicWatcher
 from lyrics_panel_bridge import PanelBridge
 from menubar_lyrics import (
+    LYRIC_COLORS,
     MODE_CAPSULE,
     MODE_LABELS,
     MODES,
+    normalize_lyric_color,
     normalize_mode,
     should_show_capsule,
     status_item_copy,
@@ -150,6 +152,7 @@ DEFAULT_CONFIG = {
     "menubar_lyrics_visible": True,
     "menubar_lyrics_mode": "capsule",
     "config_version": 3,
+    "lyrics_color": "black",
     "auto_show_with_music": False,
     "auto_hide_with_music": True,
     "auto_show_while_playing": False,
@@ -538,6 +541,8 @@ class AppDelegate(NSObject):
     _menubar_mode_items = None
     _status_icon = None
     _menubar_signature = None
+    _color_menu_items = None
+    color_menu_item = None
     _capsule_outside_since = None
     _last_rect_logged = None
     _menu_open = False
@@ -615,6 +620,7 @@ class AppDelegate(NSObject):
         self.desktop_hidden_manually = False
 
         self.menubar_capsule = CapsulePanel()
+        self.menubar_capsule.set_lyrics_color(CONFIG.get("lyrics_color"))
         self.makeStatusItem()
         self._resetPlaybackState()
         # Positional argument on purpose: PyObjC maps this method to a selector
@@ -667,6 +673,19 @@ class AppDelegate(NSObject):
         menu.addItem_(version_item)
         menu.addItem_(NSMenuItem.separatorItem())
 
+        color_menu = NSMenu.alloc().initWithTitle_("歌词颜色")
+        self._color_menu_items = {}
+        for index, (key, label, _hex) in enumerate(LYRIC_COLORS):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, "setLyricsColor:", "")
+            item.setTag_(index)
+            item.setTarget_(self)
+            color_menu.addItem_(item)
+            self._color_menu_items[key] = item
+        self.color_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("歌词颜色", None, "")
+        self.color_menu_item.setSubmenu_(color_menu)
+        menu.addItem_(self.color_menu_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+
         self.launch_at_login_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
             "✓ 开机自启动" if self._is_login_item() else "开机自启动",
             "toggleLaunchAtLogin:", ""
@@ -714,7 +733,22 @@ class AppDelegate(NSObject):
         """
         return partial(_handle_panel_event, self)
 
+    def setLyricsColor_(self, sender):
+        try:
+            key = LYRIC_COLORS[sender.tag()][0]
+        except (IndexError, TypeError):
+            return
+        CONFIG["lyrics_color"] = key
+        save_config()
+        if self.menubar_capsule is not None:
+            self.menubar_capsule.set_lyrics_color(key)
+        self.refreshMenu()
+
     def refreshMenu(self):
+        if getattr(self, "_color_menu_items", None):
+            active = normalize_lyric_color(CONFIG.get("lyrics_color"))
+            for key, item in self._color_menu_items.items():
+                item.setState_(1 if key == active else 0)
         if self.launch_at_login_menu_item is not None:
             self.launch_at_login_menu_item.setTitle_(
                 "✓ 开机自启动" if self._is_login_item() else "开机自启动"

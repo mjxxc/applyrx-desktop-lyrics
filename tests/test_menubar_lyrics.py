@@ -182,3 +182,41 @@ class PlayDrivenCapsuleTests(unittest.TestCase):
         self.delegate._status_item_screen_rect = lambda: None
         self.delegate._apply_menubar_state()
         self.capsule.hide.assert_called_once()
+
+
+class LyricColorTests(unittest.TestCase):
+    """The status bar menu offers a small fixed palette of lyric colours."""
+
+    def test_known_colours_are_kept(self):
+        from menubar_lyrics import LYRIC_COLORS, normalize_lyric_color
+
+        for key, _label, _hex in LYRIC_COLORS:
+            self.assertEqual(key, normalize_lyric_color(key))
+
+    def test_unknown_and_empty_fall_back_to_black(self):
+        from menubar_lyrics import normalize_lyric_color
+
+        self.assertEqual("black", normalize_lyric_color("purple"))
+        self.assertEqual("black", normalize_lyric_color(None))
+        self.assertEqual("black", normalize_lyric_color(42))
+
+    def test_hex_lookup(self):
+        from menubar_lyrics import lyric_color_hex
+
+        self.assertEqual("#FF3B30", lyric_color_hex("red"))
+        self.assertEqual("#111111", lyric_color_hex("nonsense"))
+
+    def test_menu_handler_applies_the_colour(self):
+        from unittest.mock import MagicMock
+
+        import applyrx_ui
+
+        applyrx_ui.CONFIG = dict(applyrx_ui.DEFAULT_CONFIG)
+        delegate = applyrx_ui.AppDelegate.alloc().init()
+        delegate.menubar_capsule = MagicMock()
+        delegate.refreshMenu = MagicMock()
+        sender = MagicMock()
+        sender.tag.return_value = 2  # red in LYRIC_COLORS
+        delegate.setLyricsColor_(sender)
+        self.assertEqual("red", applyrx_ui.CONFIG["lyrics_color"])
+        delegate.menubar_capsule.set_lyrics_color.assert_called_once_with("red")
