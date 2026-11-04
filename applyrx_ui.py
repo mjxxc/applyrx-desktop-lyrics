@@ -994,7 +994,9 @@ class AppDelegate(NSObject):
             current = self.lines[index].get("text", "")
             following = self.lines[index + 1].get("text", "") if index + 1 < len(self.lines) else ""
             return current, following
-        return "", ""
+        # No lyric line yet: fall back to the track identity (intro period).
+        player = self.player or {}
+        return player.get("name") or "", player.get("artist") or ""
 
     def _menubar_is_playing(self):
         return (self.player or {}).get("state") == "playing"

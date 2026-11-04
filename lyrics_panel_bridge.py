@@ -361,13 +361,14 @@ class PanelBridge:
                 with self._control_lock:
                     # During the gap after a line the engine reports no current
                     # line; keep the previous one so the menu bar does not blink.
-                    # Before the first line starts, show the upcoming one so the
-                    # capsule is not blank for the whole intro.
-                    current = message.get("current") or message.get("previous")
+                    current = message.get("current") or message.get("previous") or ""
                     upcoming = message.get("next") or ""
                     if not current:
-                        current, upcoming = upcoming, ""
-                    self._lyric_pair = (current or "", upcoming)
+                        # Intro before the first lyric line (or a song without
+                        # lyrics): show the track identity instead of nothing.
+                        current = message.get("title") or ""
+                        upcoming = message.get("artist") or ""
+                    self._lyric_pair = (current, upcoming)
                 payload = json.dumps(
                     message,
                     ensure_ascii=False,
