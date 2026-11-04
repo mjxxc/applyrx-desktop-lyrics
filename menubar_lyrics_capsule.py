@@ -41,6 +41,9 @@ from AppKit import (
     NSWindowStyleMaskBorderless,
     NSWindowStyleMaskNonactivatingPanel,
     NSStatusWindowLevel,
+    NSTextAlignmentCenter,
+    NSMutableParagraphStyle,
+    NSParagraphStyleAttributeName,
 )
 
 from menubar_lyrics import capsule_copy
@@ -123,10 +126,13 @@ class CapsulePanel:
             content = fallback
         self.window.setContentView_(content)
 
+        self._paragraph_style = self._make_paragraph_style()
+        self.current_label.setParagraphStyle_(self._paragraph_style) if False else None
         self._current_shadow = self._make_shadow(0.85)
         self._next_shadow = self._make_shadow(0.75)
-        self.current_label = self._make_label(CURRENT_FONT_SIZE, NSFontWeightSemibold, 1.0)
-        self.next_label = self._make_label(NEXT_FONT_SIZE, NSFontWeightRegular, NEXT_ALPHA)
+        self._paragraph_style = self._make_paragraph_style()
+        self.current_label = self._make_label(CURRENT_FONT_SIZE, NSFontWeightSemibold, 1.0, self._paragraph_style)
+        self.next_label = self._make_label(NEXT_FONT_SIZE, NSFontWeightRegular, NEXT_ALPHA, self._paragraph_style)
         content.addSubview_(self.current_label)
         content.addSubview_(self.next_label)
         self._layout()
@@ -142,13 +148,21 @@ class CapsulePanel:
         return shadow
 
     @staticmethod
-    def _make_label(size, weight, alpha):
+    def _make_paragraph_style():
+        style = NSMutableParagraphStyle.alloc().init()
+        style.setAlignment_(NSTextAlignmentCenter)
+        style.setLineBreakMode_(NSLineBreakByTruncatingTail)
+        return style
+
+    @staticmethod
+    def _make_label(size, weight, alpha, paragraph_style):
         field = NSTextField.alloc().initWithFrame_(NSMakeRect(0.0, 0.0, 10.0, size))
         field.setBezeled_(False)
         field.setDrawsBackground_(False)
         field.setEditable_(False)
         field.setSelectable_(False)
         field.setUsesSingleLineMode_(True)
+        field.setAlignment_(NSTextAlignmentCenter)
         field.setLineBreakMode_(NSLineBreakByTruncatingTail)
         font = NSFont.systemFontOfSize_weight_(size, weight)
         field.setFont_(font)
@@ -156,11 +170,14 @@ class CapsulePanel:
         return field
 
     @staticmethod
-    def _attributed(text, field, shadow):
+    def _attributed(text, field, shadow, paragraph_style):
         attrs = {
             NSFontAttributeName: field.font(),
             NSForegroundColorAttributeName: field.textColor(),
             NSShadowAttributeName: shadow,
+            # Attributed text takes its alignment from the paragraph style, not
+            # from the field, so centring has to be in the attributes.
+            NSParagraphStyleAttributeName: paragraph_style,
         }
         return NSAttributedString.alloc().initWithString_attributes_(text, attrs)
 
@@ -172,10 +189,10 @@ class CapsulePanel:
             return
         self._current_text, self._next_text = line1, line2
         self.current_label.setAttributedStringValue_(
-            self._attributed(line1, self.current_label, self._current_shadow)
+            self._attributed(line1, self.current_label, self._current_shadow, self._paragraph_style)
         )
         self.next_label.setAttributedStringValue_(
-            self._attributed(line2, self.next_label, self._next_shadow)
+            self._attributed(line2, self.next_label, self._next_shadow, self._paragraph_style)
         )
         self._layout()
 
