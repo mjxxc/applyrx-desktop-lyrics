@@ -1,9 +1,9 @@
 # Applyrx
 
-**Applyrx v0.2.4 —— 稳定启动与面板校验**
+**Applyrx v0.2.5 —— 菜单栏玻璃歌词**
 
-Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它从 Apple Music
-本地缓存读取带时间戳的歌词，并通过可点击穿透的 Liquid Glass 浮窗及菜单栏显示。
+Applyrx 是一款面向 Apple Music 的非官方 macOS 菜单栏歌词工具。它从 Apple Music
+本地缓存读取带时间戳的歌词，在播放时于菜单栏下方自动显示透明玻璃歌词胶囊。
 
 本项目基于并受 MIT 许可的
 [Applyrx](https://github.com/rakei076/applyrx) 项目启发，是独立的非官方第三方
@@ -17,32 +17,16 @@ Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它�
 
 ## 功能
 
-- macOS 26 原生 **Liquid Glass** 歌词浮窗（`NSGlassEffectView`，clear 样式），
-  紧凑浮窗形态。
-- **连续向上滚动**：单一歌词轨道 + 裁切视口，当前句与下一句一起上移；当前句的
-  样式与滚动同步过渡，滚动结束时不会再跳变。
-- **显示行数模式**：
-
-  | 模式 | 内容 |
-  | --- | --- |
-  | 1 行 | 当前句 |
-  | 2 行（默认） | 当前句 + 下一句 |
-  | 3 行 | 上一句 + 当前句 + 下一句 |
-
-- 前奏身份卡：首句歌词开始前显示**歌曲名 + 歌手**。
-- 歌词行之间的间隙里保持显示当前句，直到下一句的起始时间到达。
-- Apple Music 提供逐字时间时显示 **word-level highlighting**；没有逐字时间时
-  自动回退到行级歌词。
-- 跟随 Apple Music 播放状态：暂停/继续、seek、大幅 seek 直接定位（不逐句滚动）、
-  切歌直接切换。
-- 默认点击穿透的浮窗，以及临时拖动模式；拖动模式会自动恢复点击穿透。
-- 全局快捷键：`Control-Option-Command-L` 显示/隐藏歌词浮窗；
-  `Control-Option-Command-M` 临时启用拖动模式。
-- 原生设置窗口：当前句字号、上下文行字号、上下文透明度、显示行数（1/2/3）、
-  玻璃强度、记住浮窗位置、启动时恢复位置，以及"恢复默认"。
-- 严格匹配当前歌曲；不根据不完整或冲突的元数据猜测；当前歌曲首次未匹配时会重试
-  本地缓存查询。
+- 菜单栏常驻一个 ♪ 图标，**播放音乐时自动显示玻璃歌词胶囊**（当前句 + 下一句），
+  暂停或退出 Apple Music 时自动消失，不需要点击或悬停。
+- 胶囊使用 macOS 26 原生 **Liquid Glass**（`NSGlassEffectView`，clear 样式）：透明
+  玻璃透出背后内容，**点击穿透**，不挡任何操作。
+- 黑色歌词文字 + 浅色光环阴影，亮色窗口和深色背景都保持可读。
+- 歌词行之间的间隙保持显示当前句，直到下一句起始时间到达。
+- 严格匹配当前歌曲；不根据不完整或冲突的元数据猜测；首次未匹配时会重试本地缓存查询。
 - 缓存内容未变化时复用扫描与解析结果，并区分常见的歌词识别失败原因。
+- 开机自启动（菜单里可开关）。
+- 菜单极简：版本号 / 开机自启动 / 退出。
 
 ## 环境要求
 
@@ -52,11 +36,11 @@ Applyrx 是一款面向 Apple Music 的非官方 macOS 桌面歌词工具。它�
 - 安装 Apple Music.app，且本地缓存中已有该歌曲的歌词。必要时可在 Music 中打开
   内建歌词面板以产生本地缓存。
 - macOS 自动化权限，以便读取 Music.app 当前曲目信息。
-- Python 3.10 或更新版本，但**仅用于从源码构建**。v0.2.4 Release 使用 Python 3.12.5 构建。
+- Python 3.10 或更新版本，但**仅用于从源码构建**。v0.2.5 Release 使用 Python 3.12.5 构建。
 
 ## 安装
 
-从 GitHub Releases 页面下载发布资源 `Applyrx-v0.2.4-macOS.zip`，解压后把
+从 GitHub Releases 页面下载发布资源 `Applyrx-v0.2.5-macOS.zip`，解压后把
 `Applyrx.app` 拖到"应用程序"文件夹（也可以就地运行）。
 
 ### 首次打开
@@ -92,8 +76,8 @@ Python；必要时可通过 `APPLYRX_PYTHON` 指定解释器。
 
 ```bash
 ./scripts/release_macos.sh
-# → Applyrx-v0.2.4-macOS.zip
-# → Applyrx-v0.2.4-macOS.zip.sha256
+# → Applyrx-v0.2.5-macOS.zip
+# → Applyrx-v0.2.5-macOS.zip.sha256
 ```
 
 `scripts/release_macos.sh` 会在打包前校验版本信息、最低系统版本、架构，并确认
@@ -110,10 +94,13 @@ bundle 内不含构建机路径与用户数据。它**不会**执行 `git commit
   tests.test_lyrics_panel \
   tests.test_lyrics_provider \
   tests.test_lyrics_sync \
+  tests.test_menubar_lyrics \
   tests.test_music_cache_diagnostic \
+  tests.test_music_lifecycle \
   tests.test_no_fixed_home_path \
+  tests.test_playback_visibility \
   tests.test_word_timing_diagnostic
-# 预期：Ran 120 tests — OK
+# 预期：Ran 264 tests — OK
 ```
 
 `tests/` 中没有 `__init__.py`，因此 `python -m unittest discover` 不可用；请使用上面
@@ -135,21 +122,11 @@ git diff --check
 
 ## 使用
 
-1. 启动 Applyrx，并允许 macOS 自动化权限请求读取 Music.app。
-2. 在 Apple Music 中播放歌曲。
-3. 如果暂时没有歌词，可在 Music 中打开该歌曲的内建歌词面板，并等待本地缓存更新。
-   Applyrx 会对当前歌曲重试本地查询。
-4. 使用菜单栏控制面板显示状态；选择"Settings…"可实时调整歌词和窗口外观。
-
-如果歌曲歌词尚未进入本地缓存、缓存的是不同版本、元数据不完整/冲突，或严格匹配
-无法确认歌词归属，歌词可能不会显示。
-
-## 快捷键
-
-| 快捷键 | 操作 |
-| --- | --- |
-| `Control-Option-Command-L` | 显示或隐藏桌面歌词浮窗 |
-| `Control-Option-Command-M` | 临时启用拖动模式；之后自动恢复点击穿透 |
+1. 启动 Applyrx，菜单栏出现 ♪ 图标。
+2. 在 Apple Music 播放歌曲——歌词胶囊会自动出现在 ♪ 下方并逐句更新。
+3. 暂停或退出 Apple Music，胶囊自动消失。
+4. 若某首歌没有歌词：在 Music 中打开该歌曲的内建歌词页，等待本地缓存更新；
+   Applyrx 会重试本地查询。
 
 ## 架构
 
@@ -161,8 +138,6 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
                               │ 只读
                               ▼
                  Cache.db + fsCachedData
-                              │
-                         歌曲目录缓存响应
                               │ 严格身份及元数据匹配
                               ▼
              syllable-lyrics TTML ──▶ TTMLParser
@@ -172,14 +147,14 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
                                            │
                              Python 面板桥接（stdin 上的 JSON）
                                            ▼
-                       SwiftUI Liquid Glass 浮窗 + 设置窗口
+                    菜单栏歌词胶囊（AppKit NSGlassEffectView）
                                            │
-                     单一歌词轨道 + 裁切视口 + 整体位移
+                 播放时自动显示 / 暂停或退出 Music 自动隐藏
 ```
 
-浮窗以 Music 报告的播放位置作为同步参考。歌词来自本地缓存中带有 Apple Music
+胶囊以 Music 报告的播放位置作为同步参考。歌词来自本地缓存中带有 Apple Music
 `syllable-lyrics` 扩展的歌曲目录响应；Applyrx 不会向第三方歌词服务请求歌曲识别
-或歌词内容。
+或歌词内容。原生 Swift 面板进程仍作为歌词引擎运行，但窗口不再显示。
 
 ## Apple Music 数据来源
 
@@ -193,37 +168,27 @@ CurrentTrackManager ──▶ AppleMusicCacheProvider
 
 ## 限制
 
-- Apple Music 没有向普通第三方开发者公开提供完整定时歌词的通用接口。本项目依赖
-  Apple Music 本地缓存格式这一实现细节；Apple Music 或 macOS 更新可能改变格式并
-  导致兼容性问题。
-- 歌词响应必须已存在于本地缓存中。并非所有歌曲、地区或版本都一定可用。
-- 为避免显示错误歌词，当歌曲身份或元数据不足、不完整或冲突时，严格匹配会拒绝显示。
-- 逐字高亮和上下文行取决于 Apple Music 提供的时间数据及缓存歌词；没有逐字时间时
-  会自动回退到行级歌词。
-- **需要 macOS 26.0 或更新版本以及 Apple Silicon Mac。** 不支持其他播放器或操作系统。
-- 当前 Release App 只做了 ad-hoc 签名：没有 Developer ID 签名，也没有公证。
+- 歌词只在 Apple Music **播放时**显示：暂停、停止或退出 Music 会隐藏胶囊。
+- 胶囊位置固定在菜单栏 ♪ 图标下方，不提供拖动或自定义位置。
+- 仅支持 macOS 26（Liquid Glass 需要）与 Apple Silicon。
+- 依赖 Apple Music 本地缓存中的歌词；缓存里没有的歌曲无法显示歌词。
+- 严格匹配当前歌曲，宁可无歌词也不猜。
 
 ## 故障排查
 
-**浮窗显示没有匹配歌词。** 确认 Music.app 正在播放目标歌曲，然后在 Music 中打开该
-歌曲的内建歌词面板，使本地缓存有机会更新。Applyrx 会重试；如果严格身份校验无法
-确认候选属于当前歌曲，仍会拒绝显示。
+**没有看到歌词胶囊。** 确认 Apple Music 正在播放（不是暂停），并检查菜单栏的 ♪
+图标是否存在。首次匹配某首歌可能需要一两秒。
 
-**应用无法读取当前歌曲。** 在"系统设置 → 隐私与安全性 → 自动化"中检查并允许
-Applyrx 访问 Music.app。更改权限后重启 Applyrx。
+**某首歌一直没有歌词。** 在 Music 中打开该歌曲的内建歌词页，等待本地缓存更新后
+再试；Applyrx 会重试本地查询。
 
-**macOS 提示无法验证应用。** 当前版本没有公证。请右键选择"打开"，或在"系统设置 →
-隐私与安全性"中放行。
+**胶囊挡住内容。** 胶囊点击穿透且只有 60pt 高；需要隐藏时暂停音乐即可。
 
-**没有看到歌词面板。** 检查菜单栏中的 Applyrx 控件，并按
-`Control-Option-Command-L` 切换桌面歌词。确认 macOS 允许应用运行。
-
-**无法移动浮窗。** 按 `Control-Option-Command-M` 进入临时拖动模式；拖动时限结束后
-会自动恢复点击穿透。
+**应用没在运行。** 确认菜单栏有 ♪ 图标；没有就重新打开 Applyrx。
 
 ## 发布状态
 
-- 发布资源：`Applyrx-v0.2.4-macOS.zip` 与 `Applyrx-v0.2.4-macOS.zip.sha256`。
+- 发布资源：`Applyrx-v0.2.5-macOS.zip` 与 `Applyrx-v0.2.5-macOS.zip.sha256`。
 - 签名：ad-hoc（`codesign -s -`），无 Developer ID，`TeamIdentifier` 未设置。
 - 公证：未公证。
 - 分发：仅 GitHub Releases，没有 App Store 版本。
