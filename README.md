@@ -1,10 +1,10 @@
 # Applyrx
 
-**Applyrx v0.2.4 — Reliable Startup & Panel Verification**
+**Applyrx v0.2.5 — Menu Bar Glass Lyrics**
 
-Applyrx is an unofficial macOS desktop lyrics overlay for Apple Music. It reads
-timed lyrics from Apple Music's local cache and shows them in a synchronized,
-click-through Liquid Glass panel with menu bar integration.
+Applyrx is an unofficial macOS menu bar lyrics app for Apple Music. It reads
+timed lyrics from Apple Music's local cache and shows them in a translucent
+glass capsule under the menu bar while music plays.
 
 This project is based on and inspired by the MIT-licensed
 [Applyrx](https://github.com/rakei076/applyrx) project. It is an independent,
@@ -19,38 +19,19 @@ sponsored by Apple.
 
 ## Features
 
-- macOS 26 native **Liquid Glass** lyrics panel (`NSGlassEffectView`, clear
-  style) in a compact floating window.
-- **Continuous upward lyric scrolling** on a single lyric track with a clipped
-  viewport: the current line and the next line move together, and the styled
-  current line transitions in step with the scroll instead of jumping when the
-  scroll finishes.
-- **Display line modes**:
-
-  | Mode | Content |
-  | --- | --- |
-  | 1 line | current line |
-  | 2 lines (default) | current line + next line |
-  | 3 lines | previous line + current line + next line |
-
-- Track identity card (**song title + artist**) while the song is still in its
-  intro, before the first timed lyric line.
-- The current line is kept through gaps between lyric lines until the next line's
-  start time is reached.
-- **Word-level highlighting** when Apple Music supplies word timing; automatic
-  fallback to line-level lyrics when it does not.
-- Follows Apple Music playback: pause and resume, seeking, large-seek
-  relocation (the panel jumps straight to the target line), and track changes.
-- Click-through overlay with a temporary drag mode that restores click-through.
-- Global shortcuts: `Control-Option-Command-L` toggles the lyrics panel;
-  `Control-Option-Command-M` temporarily enables drag mode.
-- Native Settings window: current lyric size, context lyric size, context
-  opacity, displayed line count (1/2/3), glass tint, remember window position,
-  restore window position on launch, and Restore Defaults.
-- Strict track matching: incomplete or conflicting metadata is never guessed;
-  a local cache lookup is retried for a track that initially has no match.
-- Reuses parsed cache results while the on-disk cache is unchanged, and provides
-  specific diagnostics for common lyric-discovery failures.
+- A single ♪ item in the menu bar. **While Apple Music plays, a translucent glass
+  lyric capsule appears by itself** (current line + next line) and disappears
+  when playback pauses or Music quits. No clicks, no hovering.
+- Native macOS 26 **Liquid Glass** (`NSGlassEffectView`, clear style): the capsule
+  lets the content behind it show through, and it is **click-through**.
+- Black lyric text with a light halo, readable over light windows and dark ones.
+- Between lyric lines the current line stays visible until the next line starts.
+- Strict matching against the current track; no guessing from incomplete or
+  conflicting metadata, with a retry of the local lookup on a first miss.
+- Reuses scan/parse results while the cache is unchanged and distinguishes the
+  common failure reasons.
+- Launch at login (toggle in the menu).
+- Minimal menu: version / launch at login / quit.
 
 ## Requirements
 
@@ -61,11 +42,11 @@ sponsored by Apple.
 - Apple Music.app with lyrics already present in its local cache. Opening the
   built-in lyrics view in Music may be necessary to populate local cache data.
 - macOS Automation permission for reading the current Apple Music track.
-- Python 3.10 or newer, but **only** when building from source. The v0.2.4 release build uses Python 3.12.5.
+- Python 3.10 or newer, but **only** when building from source. The v0.2.5 release build uses Python 3.12.5.
 
 ## Installation
 
-Download the release asset `Applyrx-v0.2.4-macOS.zip` from the GitHub Releases
+Download the release asset `Applyrx-v0.2.5-macOS.zip` from the GitHub Releases
 page, unzip it, and move `Applyrx.app` to your Applications folder (or run it
 from anywhere).
 
@@ -105,8 +86,8 @@ To produce the release archive and its checksum:
 
 ```bash
 ./scripts/release_macos.sh
-# → Applyrx-v0.2.4-macOS.zip
-# → Applyrx-v0.2.4-macOS.zip.sha256
+# → Applyrx-v0.2.5-macOS.zip
+# → Applyrx-v0.2.5-macOS.zip.sha256
 ```
 
 `scripts/release_macos.sh` verifies the version metadata, the minimum system
@@ -124,10 +105,13 @@ Run the Python test suite from the repository root:
   tests.test_lyrics_panel \
   tests.test_lyrics_provider \
   tests.test_lyrics_sync \
+  tests.test_menubar_lyrics \
   tests.test_music_cache_diagnostic \
+  tests.test_music_lifecycle \
   tests.test_no_fixed_home_path \
+  tests.test_playback_visibility \
   tests.test_word_timing_diagnostic
-# expected: Ran 120 tests — OK
+# expected: Ran 264 tests — OK
 ```
 
 `tests/` intentionally has no `__init__.py`, so `python -m unittest discover` is
@@ -150,24 +134,12 @@ git diff --check
 
 ## Usage
 
-1. Start Applyrx and allow its macOS Automation request to read Music.app.
-2. Play a song in Apple Music.
-3. If lyrics are not found yet, open that song's built-in lyrics view in Music
-   and give the local cache time to update. Applyrx retries local lookup for the
-   current track.
-4. Use the menu bar controls to show or hide the panel and configure its
-   appearance. Choose **Settings…** for live lyric and window preferences.
-
-Lyrics may remain unavailable if the data is not cached, a different song
-version is cached, metadata is incomplete/conflicting, or strict matching cannot
-establish that the cached lyrics belong to the current track.
-
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-| --- | --- |
-| `Control-Option-Command-L` | Show or hide the desktop lyrics overlay |
-| `Control-Option-Command-M` | Temporarily enable drag mode; click-through is restored automatically |
+1. Launch Applyrx; a ♪ icon appears in the menu bar.
+2. Play a song in Apple Music. The lyric capsule shows up under the ♪ icon and
+   updates line by line.
+3. Pause Music or quit it — the capsule hides by itself.
+4. If a song has no lyrics yet, open its built-in lyrics view in Music so the
+   local cache updates; Applyrx retries the local lookup.
 
 ## Architecture
 
@@ -217,48 +189,32 @@ lyrics service to identify or provide lyrics.
 
 ## Limitations
 
-- Apple Music does not provide ordinary third-party developers with a public,
-  general-purpose interface to its complete timed lyric catalog. This project
-  depends on Apple Music's local cache format, an implementation detail that can
-  change with Apple Music or macOS updates.
-- A lyric response must already be present in the local cache. Not every track,
-  storefront, or song version will be available.
-- Strict matching intentionally refuses to display lyrics when identity or
-  metadata is insufficient, incomplete, or conflicting.
-- Word-level highlighting and context lines depend on the timing and cached
-  lyrics Apple Music supplies; without word timing Applyrx falls back to
-  line-level lyrics.
-- **macOS 26.0 or newer and an Apple Silicon Mac are required.** Other players
-  and operating systems are not supported.
-- The current release app is ad-hoc signed only: not Developer ID signed and not
-  notarized.
+- Lyrics are shown only while Apple Music is **playing**: pause, stop or quit
+  hides the capsule.
+- The capsule is anchored under the ♪ item; its position is not configurable.
+- macOS 26 (Liquid Glass) and Apple Silicon only.
+- Depends on lyrics in Apple Music's local cache; songs without cached lyrics
+  cannot be displayed.
+- Strict matching: no lyrics is preferred over guessing.
 
 ## Troubleshooting
 
-**The overlay says no matching lyrics.** Confirm Music.app is playing the
-intended track, then open that track's built-in lyrics view so Music can
-populate its local cache. Applyrx will retry. It will continue to refuse a
-candidate if strict identity checks cannot establish a safe match.
+**No lyric capsule.** Make sure Apple Music is actually playing (not paused) and
+that the ♪ item exists in the menu bar. The first match for a song can take a
+second or two.
 
-**The app cannot read the current track.** Check macOS Privacy & Security →
-Automation and allow Applyrx to access Music.app. Restart Applyrx after changing
-the permission.
+**A song never shows lyrics.** Open its built-in lyrics view in Music, let the
+local cache update, and try again; Applyrx retries the local lookup.
 
-**macOS says the app cannot be verified.** The release is not notarized. Open it
-with right-click → **Open**, or allow it under System Settings → Privacy &
-Security.
+**The capsule covers something.** It is click-through and only 60pt tall; pause
+the music to hide it.
 
-**The panel does not appear.** Check the Applyrx menu bar item and toggle
-desktop lyrics with `Control-Option-Command-L`. Confirm macOS permits the
-application to run.
-
-**The overlay cannot be moved.** Use `Control-Option-Command-M` to enter
-temporary drag mode. Click-through is restored automatically after the drag
-window.
+**The app is not running.** Check for the ♪ item; if it is missing, open
+Applyrx again.
 
 ## Release status
 
-- Release asset: `Applyrx-v0.2.4-macOS.zip` with `Applyrx-v0.2.4-macOS.zip.sha256`.
+- Release asset: `Applyrx-v0.2.5-macOS.zip` with `Applyrx-v0.2.5-macOS.zip.sha256`.
 - Signing: ad-hoc (`codesign -s -`), no Developer ID, `TeamIdentifier` not set.
 - Notarization: not notarized.
 - Distribution: GitHub Releases only. There is no App Store release.

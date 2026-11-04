@@ -47,8 +47,15 @@ class PlaybackVisibilityTests(unittest.TestCase):
     # ── basic show / hide ─────────────────────────────────────
 
     def test_playing_shows(self):
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         self.delegate._syncPlaybackVisibility(player("playing"))
         self.assertIn((True, False), self.calls)
+
+    def test_playing_does_not_show_when_auto_show_is_off(self):
+        # v0.2.5 default: the panel is opt-in, the menu bar capsule is primary.
+        self.assertFalse(applyrx_ui.DEFAULT_CONFIG["auto_show_while_playing"])
+        self.delegate._syncPlaybackVisibility(player("playing"))
+        self.assertNotIn((True, False), self.calls)
 
     def test_paused_hides_after_debounce(self):
         applyrx_ui.CONFIG["auto_show_while_playing"] = True
@@ -113,6 +120,7 @@ class PlaybackVisibilityTests(unittest.TestCase):
         self.assertNotIn((True, False), self.calls)
 
     def test_manual_hidden_then_shown_restores_auto(self):
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         self.delegate.desktop_hidden_manually = True
         self.delegate._syncPlaybackVisibility(player("playing"))
         self.assertEqual(self.calls, [])
@@ -142,10 +150,11 @@ class PlaybackVisibilityTests(unittest.TestCase):
             self.delegate._syncPlaybackVisibility(player("paused"))
         self.assertNotIn((False, False), self.calls)
 
-    def test_playback_rule_disabled_still_shows_on_playing(self):
+    def test_playback_rule_disabled_keeps_panel_hidden(self):
+        """v0.2.5: with the rule off, playback must not raise the panel."""
         applyrx_ui.CONFIG["auto_show_while_playing"] = False
         self.delegate._syncPlaybackVisibility(player("playing"))
-        self.assertIn((True, False), self.calls)
+        self.assertNotIn((True, False), self.calls)
 
     # ── track change must not hide ────────────────────────────
 
@@ -185,6 +194,7 @@ class StartupVisibilityTests(unittest.TestCase):
         self.assertNotIn(True, calls)
 
     def test_launch_while_playing_shows(self):
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         delegate = applyrx_ui.AppDelegate.alloc().init()
         calls = []
         delegate._setDesktopLyricsVisible = lambda v, manual=False: calls.append(bool(v))
@@ -217,6 +227,7 @@ class PlaybackPollWhileNativeTests(unittest.TestCase):
         )
 
     def test_poll_samples_player_state(self):
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         with patch("applyrx_ui.core.get_player_info", return_value=player("playing")) as mocked:
             with patch("applyrx_ui.time.monotonic", side_effect=[100.0, 100.1]):
                 # First call is throttled by the sync timestamp, so prime it.
@@ -329,6 +340,7 @@ class PanelStateConsistencyTests(unittest.TestCase):
 
         The stale Python flag must not suppress the SHOW.
         """
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         applyrx_ui.CONFIG["desktop_visible"] = True
         self._attach_running_bridge(panel_visible=False)
 
@@ -339,6 +351,7 @@ class PanelStateConsistencyTests(unittest.TestCase):
 
     def test_python_hidden_but_panel_visible_and_paused_hides(self):
         """Python thinks hidden, panel is actually visible, Music paused."""
+        applyrx_ui.CONFIG["auto_show_while_playing"] = True
         applyrx_ui.CONFIG["desktop_visible"] = False
         self._attach_running_bridge(panel_visible=True)
 
@@ -350,29 +363,24 @@ class PanelStateConsistencyTests(unittest.TestCase):
         self.assertIn(False, self.calls, "panel was visible but no HIDE was issued")
         self.assertEqual(applyrx_ui.CONFIG["desktop_visible"], False)
 
-    def test_panel_event_true_syncs_python(self):
-        """Swift reports visible=true -> host CONFIG follows."""
+    def test_panel_visibility_event_cannot_revive_the_panel(self):
+        """v0.2.5 retired the floating panel: its hot key must stay a no-op."""
         applyrx_ui.CONFIG["desktop_visible"] = False
-        applyrx_ui._handle_panel_event(self.delegate, {
-            "event": "visibilityChanged", "visible": True,
-        })
-        self.assertTrue(applyrx_ui.CONFIG["desktop_visible"])
-
-    def test_panel_event_false_syncs_python(self):
-        """Swift reports visible=false -> host CONFIG follows."""
-        applyrx_ui.CONFIG["desktop_visible"] = True
-        applyrx_ui._handle_panel_event(self.delegate, {
-            "event": "visibilityChanged", "visible": False,
-        })
-        self.assertFalse(applyrx_ui.CONFIG["desktop_visible"])
-
-    def test_panel_event_also_updates_bridge(self):
-        """The bridge is the source of truth, so it must hear the same news."""
         bridge = self._attach_running_bridge(panel_visible=False)
         applyrx_ui._handle_panel_event(self.delegate, {
             "event": "visibilityChanged", "visible": True,
         })
-        self.assertTrue(bridge.panel_visible)
+        self.assertFalse(applyrx_ui.CONFIG["desktop_visible"])
+        self.assertFalse(bridge.panel_visible)
+
+    def test_panel_visibility_event_keeps_panel_hidden_when_visible(self):
+        applyrx_ui.CONFIG["desktop_visible"] = True
+        bridge = self._attach_running_bridge(panel_visible=True)
+        applyrx_ui._handle_panel_event(self.delegate, {
+            "event": "visibilityChanged", "visible": True,
+        })
+        self.assertFalse(applyrx_ui.CONFIG["desktop_visible"])
+        self.assertFalse(bridge.panel_visible)
 
     def test_actual_visibility_prefers_bridge_over_config(self):
         self._attach_running_bridge(panel_visible=False)

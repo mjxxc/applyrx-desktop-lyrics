@@ -188,6 +188,9 @@ class PanelBridge:
         self._panel_visible = True
         self._panel_visibility_pending = True
         self._open_settings = False
+        # Latest (current, next) lyric text, for the menu bar capsule. Written
+        # by the snapshot thread and read by the AppKit thread under the lock.
+        self._lyric_pair = ("", "")
 
     @property
     def is_running(self) -> bool:
@@ -227,6 +230,12 @@ class PanelBridge:
                 daemon=True,
             )
             self.event_thread.start()
+
+    @property
+    def current_lyric_pair(self):
+        """``(current, next)`` lyric text from the latest engine snapshot."""
+        with self._control_lock:
+            return self._lyric_pair
 
     @property
     def panel_visible(self) -> Optional[bool]:
@@ -340,16 +349,28 @@ class PanelBridge:
                     self._panel_visibility_pending = False
                     open_settings = self._open_settings
                     self._open_settings = False
-                if not desired_visibility and not open_settings and not visibility_pending:
-                    self.stop_event.wait(self.interval)
-                    continue
+                # Always sample the engine, even when the desktop panel is
+                # hidden: the menu bar capsule keeps showing the current lyric,
+                # and the panel only changes visibility when it is told to.
                 state = manager.update(watcher.poll())
+                message = panel_message(
+                    state,
+                    panel_visible=panel_visible,
+                    open_settings=open_settings,
+                )
+                with self._control_lock:
+                    # During the gap after a line the engine reports no current
+                    # line; keep the previous one so the menu bar does not blink.
+                    current = message.get("current") or message.get("previous") or ""
+                    upcoming = message.get("next") or ""
+                    if not current:
+                        # Intro before the first lyric line (or a song without
+                        # lyrics): show the track identity instead of nothing.
+                        current = message.get("title") or ""
+                        upcoming = message.get("artist") or ""
+                    self._lyric_pair = (current, upcoming)
                 payload = json.dumps(
-                    panel_message(
-                        state,
-                        panel_visible=panel_visible,
-                        open_settings=open_settings,
-                    ),
+                    message,
                     ensure_ascii=False,
                     separators=(",", ":"),
                 ).encode("utf-8") + b"\n"

@@ -76,6 +76,7 @@ from AppKit import (
     NSFontAttributeName,
     NSForegroundColorAttributeName,
     NSGraphicsContext,
+    NSImageOnly,
     NSMakeRect,
     NSMenu,
     NSMenuItem,
@@ -108,8 +109,18 @@ from PyObjCTools import AppHelper
 import main as core
 from apple_music_watcher import AppleMusicWatcher
 from lyrics_panel_bridge import PanelBridge
+from menubar_lyrics import (
+    MODE_CAPSULE,
+    MODE_LABELS,
+    MODES,
+    normalize_mode,
+    should_show_capsule,
+    status_item_copy,
+)
+from menubar_lyrics_capsule import CapsulePanel, status_icon
 
 
+APP_VERSION = "0.2.5"
 PANEL_WIDTH = 980
 PANEL_HEIGHT = 112
 NS_VARIABLE_STATUS_ITEM_LENGTH = -1
@@ -137,9 +148,11 @@ DEFAULT_CONFIG = {
     "desktop_visible": True,
     "desktop_click_through": True,
     "menubar_lyrics_visible": True,
-    "auto_show_with_music": True,
+    "menubar_lyrics_mode": "capsule",
+    "config_version": 3,
+    "auto_show_with_music": False,
     "auto_hide_with_music": True,
-    "auto_show_while_playing": True,
+    "auto_show_while_playing": False,
 }
 CONFIG = dict(DEFAULT_CONFIG)
 APP_DELEGATE = None
@@ -168,6 +181,15 @@ def load_config() -> dict:
             data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 config.update({k: data[k] for k in DEFAULT_CONFIG if k in data})
+                # v0.2.5 migration: the menu bar capsule becomes the primary
+                # lyric surface, so the floating desktop panel stops appearing
+                # on its own. Users can re-enable it in the menu; the version
+                # marker keeps a later choice from being overwritten.
+                if int(data.get("config_version", 2) or 2) < 3:
+                    config["auto_show_with_music"] = False
+                    config["auto_show_while_playing"] = False
+                    config["desktop_visible"] = False
+                    config["config_version"] = 3
     except Exception as exc:
         log(f"config load error: {exc}")
     return config
@@ -512,6 +534,13 @@ class AppDelegate(NSObject):
     lyrics_window = None
     native_panel_bridge = None
     music_watcher = None
+    menubar_capsule = None
+    _menubar_mode_items = None
+    _status_icon = None
+    _menubar_signature = None
+    _capsule_outside_since = None
+    _last_rect_logged = None
+    _menu_open = False
     # Session-only flag: never persisted to CONFIG. Tracks whether the user
     # explicitly hid the panel during this Applyrx session, so the Apple Music
     # auto-show does not fight a deliberate manual choice.
@@ -585,6 +614,7 @@ class AppDelegate(NSObject):
         CONFIG["desktop_visible"] = False
         self.desktop_hidden_manually = False
 
+        self.menubar_capsule = CapsulePanel()
         self.makeStatusItem()
         self._resetPlaybackState()
         # Positional argument on purpose: PyObjC maps this method to a selector
@@ -618,122 +648,23 @@ class AppDelegate(NSObject):
             self.music_watcher = None
 
     def makeStatusItem(self):
+        """Menu bar item: one note icon plus a menu with just the essentials."""
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NS_VARIABLE_STATUS_ITEM_LENGTH)
-        self.status_item.button().setTitle_("applyrx")
+        self._status_icon = status_icon()
+        button = self.status_item.button()
+        if button is not None and self._status_icon is not None:
+            button.setTitle_("")
+            button.setImage_(self._status_icon)
+            button.setImagePosition_(NSImageOnly)
+
         menu = NSMenu.alloc().init()
-
-        self.settings_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Settings…",
-            "openSettings:",
-            ",",
-        )
-        self.settings_menu_item.setTarget_(self)
-        menu.addItem_(self.settings_menu_item)
-        menu.addItem_(NSMenuItem.separatorItem())
-
-        self.desktop_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "Hide Lyrics" if bool(CONFIG["desktop_visible"]) else "Show Lyrics",
-            "toggleDesktopLyrics:",
-            "",
-        )
-        self.desktop_menu_item.setTarget_(self)
-        menu.addItem_(self.desktop_menu_item)
-
-        self.drag_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "临时移动桌面歌词（10秒）" if self.desktop_click_through else "完成移动并点穿",
-            "toggleDesktopDragMode:",
-            "m",
-        )
-        self.drag_menu_item.setTarget_(self)
-        menu.addItem_(self.drag_menu_item)
-
-        self.menubar_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "隐藏菜单栏歌词" if bool(CONFIG["menubar_lyrics_visible"]) else "显示菜单栏歌词",
-            "toggleMenubarLyrics:",
-            "",
-        )
-        self.menubar_menu_item.setTarget_(self)
-        menu.addItem_(self.menubar_menu_item)
-
-        self.offset_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"Offset: {float(CONFIG['offset']):+.1f}s",
+        version_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            f"Applyrx {APP_VERSION}",
             None,
             "",
         )
-        menu.addItem_(self.offset_menu_item)
-
-        inc_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Offset +0.1s", "increaseOffset:", "]")
-        inc_item.setTarget_(self)
-        menu.addItem_(inc_item)
-
-        dec_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("Offset -0.1s", "decreaseOffset:", "[")
-        dec_item.setTarget_(self)
-        menu.addItem_(dec_item)
-
-        self.font_size_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            f"桌面歌词大小: {float(CONFIG['font_size_current']):.0f}（左小右大）",
-            None,
-            "",
-        )
-        menu.addItem_(self.font_size_menu_item)
-
-        slider_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
-        self.desktop_size_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(14, 4, 230, 24))
-        self.desktop_size_slider.setMinValue_(18.0)
-        self.desktop_size_slider.setMaxValue_(72.0)
-        self.desktop_size_slider.setDoubleValue_(float(CONFIG["font_size_current"]))
-        self.desktop_size_slider.setTarget_(self)
-        self.desktop_size_slider.setAction_("desktopSizeSliderChanged:")
-        slider_item.setView_(self.desktop_size_slider)
-        menu.addItem_(slider_item)
-
-        reset_size_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("重置桌面歌词大小", "resetDesktopFontSize:", "0")
-        reset_size_item.setTarget_(self)
-        menu.addItem_(reset_size_item)
-
-        self.background_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "隐藏桌面歌词背景" if bool(CONFIG["background_visible"]) else "显示桌面歌词背景",
-            "toggleDesktopBackground:",
-            "",
-        )
-        self.background_menu_item.setTarget_(self)
-        menu.addItem_(self.background_menu_item)
-
-        reload_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("重新匹配歌词", "reloadLyrics:", "r")
-        reload_item.setTarget_(self)
-        menu.addItem_(reload_item)
-
-        full_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("打开完整歌词窗口", "toggleLyricsWindow:", "l")
-        full_item.setTarget_(self)
-        self.lyrics_window_menu_item = full_item
-        menu.addItem_(full_item)
-
-        menu.addItem_(NSMenuItem.separatorItem())
-
-        self.auto_show_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "✓ 随 Apple Music 自动显示" if bool(CONFIG["auto_show_with_music"]) else "随 Apple Music 自动显示",
-            "toggleAutoShowWithMusic:",
-            "",
-        )
-        self.auto_show_menu_item.setTarget_(self)
-        menu.addItem_(self.auto_show_menu_item)
-
-        self.auto_hide_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "✓ 随 Apple Music 关闭自动隐藏" if bool(CONFIG["auto_hide_with_music"]) else "随 Apple Music 关闭自动隐藏",
-            "toggleAutoHideWithMusic:",
-            "",
-        )
-        self.auto_hide_menu_item.setTarget_(self)
-        menu.addItem_(self.auto_hide_menu_item)
-
-        self.playback_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
-            "✓ 播放时显示、暂停时隐藏" if bool(CONFIG["auto_show_while_playing"]) else "播放时显示、暂停时隐藏",
-            "toggleAutoShowWhilePlaying:",
-            "",
-        )
-        self.playback_menu_item.setTarget_(self)
-        menu.addItem_(self.playback_menu_item)
-
+        version_item.setEnabled_(False)
+        menu.addItem_(version_item)
         menu.addItem_(NSMenuItem.separatorItem())
 
         self.launch_at_login_menu_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
@@ -747,6 +678,8 @@ class AppDelegate(NSObject):
         quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("退出 applyrx", "terminate:", "q")
         menu.addItem_(quit_item)
         self.status_item.setMenu_(menu)
+        self.refreshMenu()
+        self._apply_menubar_state()
 
     def _startNativePanel(self, *args):
         """Start the native panel process.
@@ -782,34 +715,9 @@ class AppDelegate(NSObject):
         return partial(_handle_panel_event, self)
 
     def refreshMenu(self):
-        if self.desktop_menu_item is not None:
-            self.desktop_menu_item.setTitle_("Hide Lyrics" if bool(CONFIG["desktop_visible"]) else "Show Lyrics")
-        if self.menubar_menu_item is not None:
-            self.menubar_menu_item.setTitle_("隐藏菜单栏歌词" if bool(CONFIG["menubar_lyrics_visible"]) else "显示菜单栏歌词")
-        if self.drag_menu_item is not None:
-            self.drag_menu_item.setTitle_("临时移动桌面歌词（10秒）" if self.desktop_click_through else "完成移动并点穿")
-        if self.offset_menu_item is not None:
-            self.offset_menu_item.setTitle_(f"Offset: {float(CONFIG['offset']):+.1f}s")
-        if self.font_size_menu_item is not None:
-            self.font_size_menu_item.setTitle_(f"桌面歌词大小: {float(CONFIG['font_size_current']):.0f}（左小右大）")
-        if self.desktop_size_slider is not None:
-            self.desktop_size_slider.setDoubleValue_(float(CONFIG["font_size_current"]))
-        if self.background_menu_item is not None:
-            self.background_menu_item.setTitle_("隐藏桌面歌词背景" if bool(CONFIG["background_visible"]) else "显示桌面歌词背景")
-        if self.lyrics_window_menu_item is not None:
-            visible = self.lyrics_window is not None and self.lyrics_window.isVisible()
-            self.lyrics_window_menu_item.setTitle_("隐藏完整歌词窗口" if visible else "打开完整歌词窗口")
-        if self.auto_show_menu_item is not None:
-            self.auto_show_menu_item.setTitle_(
-                "✓ 随 Apple Music 自动显示" if bool(CONFIG["auto_show_with_music"]) else "随 Apple Music 自动显示"
-            )
-        if self.auto_hide_menu_item is not None:
-            self.auto_hide_menu_item.setTitle_(
-                "✓ 随 Apple Music 关闭自动隐藏" if bool(CONFIG["auto_hide_with_music"]) else "随 Apple Music 关闭自动隐藏"
-            )
-        if self.playback_menu_item is not None:
-            self.playback_menu_item.setTitle_(
-                "✓ 播放时显示、暂停时隐藏" if bool(CONFIG["auto_show_while_playing"]) else "播放时显示、暂停时隐藏"
+        if self.launch_at_login_menu_item is not None:
+            self.launch_at_login_menu_item.setTitle_(
+                "✓ 开机自启动" if self._is_login_item() else "开机自启动"
             )
 
     def _desktopFrame(self):
@@ -879,11 +787,6 @@ class AppDelegate(NSObject):
             self.launch_at_login_menu_item.setTitle_(
                 "✓ 开机自启动" if self._is_login_item() else "开机自启动"
             )
-
-    def toggleDesktopLyrics_(self, sender):
-        self._setDesktopLyricsVisible(
-            not bool(CONFIG["desktop_visible"]), True
-        )
 
     def _setDesktopLyricsVisible(self, *args):
         """Single entry point for showing/hiding the desktop lyrics.
@@ -988,6 +891,10 @@ class AppDelegate(NSObject):
             if self._paused_since is not None:
                 log("playback resumed before debounce: keeping lyrics visible")
                 self._paused_since = None
+            # v0.2.5: the floating panel is retired; only the glass capsule in
+            # the status bar area follows playback. Keep the panel opt-in.
+            if not bool(CONFIG["auto_show_while_playing"]):
+                return
             if not self.desktop_hidden_manually and not self._actualPanelVisible():
                 self._setDesktopLyricsVisible(True)
             return
@@ -1060,52 +967,6 @@ class AppDelegate(NSObject):
         except Exception:
             log("onMusicTerminated error:\n" + traceback.format_exc())
 
-    def toggleAutoShowWithMusic_(self, sender):
-        CONFIG["auto_show_with_music"] = not bool(CONFIG["auto_show_with_music"])
-        save_config()
-        log(f"auto_show_with_music: {bool(CONFIG['auto_show_with_music'])}")
-        # Turning the option on while Music is already playing should take effect
-        # immediately, but only when something is actually playing; otherwise the
-        # playback rule in tick_ will show it as soon as playback starts.
-        if bool(CONFIG["auto_show_with_music"]) and not self.desktop_hidden_manually:
-            try:
-                if (self.music_watcher is not None
-                        and self.music_watcher.is_music_running()):
-                    self._resetPlaybackState()
-                    self._syncPlaybackVisibility(core.get_player_info())
-            except Exception:
-                log("auto show apply error:\n" + traceback.format_exc())
-        self.refreshMenu()
-
-    def toggleAutoHideWithMusic_(self, sender):
-        CONFIG["auto_hide_with_music"] = not bool(CONFIG["auto_hide_with_music"])
-        save_config()
-        log(f"auto_hide_with_music: {bool(CONFIG['auto_hide_with_music'])}")
-        self.refreshMenu()
-
-    def toggleAutoShowWhilePlaying_(self, sender):
-        CONFIG["auto_show_while_playing"] = not bool(CONFIG["auto_show_while_playing"])
-        save_config()
-        log(f"auto_show_while_playing: {bool(CONFIG['auto_show_while_playing'])}")
-        # Enabling the rule while a track is already playing should show the
-        # lyrics right away; disabling it should stop enforcing the pause rule.
-        try:
-            self._resetPlaybackState()
-            if bool(CONFIG["auto_show_while_playing"]) and not self.desktop_hidden_manually:
-                self._syncPlaybackVisibility(self.player or core.get_player_info())
-        except Exception:
-            log("auto playback apply error:\n" + traceback.format_exc())
-        self.refreshMenu()
-
-    def openSettings_(self, sender):
-        if self.native_panel_bridge is None:
-            self.native_panel_bridge = PanelBridge()
-        if not self.native_panel_bridge.is_running:
-            self.native_panel_bridge.start(
-                panel_visible=bool(CONFIG["desktop_visible"])
-            )
-        self.native_panel_bridge.request_settings()
-
     def setDesktopClickThroughEnabled_(self, enabled):
         self.desktop_click_through = bool(enabled)
         if self.window is not None:
@@ -1118,85 +979,91 @@ class AppDelegate(NSObject):
             self.drag_unlock_timer.invalidate()
             self.drag_unlock_timer = None
 
-    def toggleDesktopDragMode_(self, sender):
-        if self.desktop_click_through:
-            self._cancelDragUnlockTimer()
-            self.setDesktopClickThroughEnabled_(False)
-            if self.window is not None and bool(CONFIG["desktop_visible"]):
-                self.window.orderFrontRegardless()
-            self.drag_unlock_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                10.0,
-                self,
-                objc.selector(self.lockDesktopClickThrough_, signature=b"v@:@"),
-                None,
-                False,
-            )
-        else:
-            self.lockDesktopClickThrough_(None)
+    def _menubar_mode(self):
+        return normalize_mode(
+            CONFIG.get("menubar_lyrics_mode"),
+            CONFIG.get("menubar_lyrics_visible"),
+        )
 
-    def lockDesktopClickThrough_(self, timer):
-        self._cancelDragUnlockTimer()
-        self.setDesktopClickThroughEnabled_(True)
+    def _menubar_lyric_pair(self):
+        bridge = self.native_panel_bridge
+        if bridge is not None and bridge.is_running:
+            return bridge.current_lyric_pair
+        if self.lines:
+            index = min(max(int(self.active_idx or 0), 0), len(self.lines) - 1)
+            current = self.lines[index].get("text", "")
+            following = self.lines[index + 1].get("text", "") if index + 1 < len(self.lines) else ""
+            return current, following
+        # No lyric line yet: fall back to the track identity (intro period).
+        player = self.player or {}
+        return player.get("name") or "", player.get("artist") or ""
 
-    def toggleMenubarLyrics_(self, sender):
-        CONFIG["menubar_lyrics_visible"] = not bool(CONFIG["menubar_lyrics_visible"])
-        save_config()
-        if self.status_item is not None and not bool(CONFIG["menubar_lyrics_visible"]):
-            self.status_item.button().setTitle_("applyrx")
-        self.refreshMenu()
+    def _menubar_is_playing(self):
+        return (self.player or {}).get("state") == "playing"
 
-    def increaseOffset_(self, sender):
-        CONFIG["offset"] = round(float(CONFIG["offset"]) + 0.1, 2)
-        save_config()
-        self.refreshMenu()
+    def _apply_menubar_state(self):
+        """While Apple Music plays, the glass capsule is on screen by itself.
 
-    def decreaseOffset_(self, sender):
-        CONFIG["offset"] = round(float(CONFIG["offset"]) - 0.1, 2)
-        save_config()
-        self.refreshMenu()
+        No hover, no menu: playing shows it, pause / quit / no lyrics hides it.
+        """
+        if self.status_item is None:
+            return
+        button = self.status_item.button()
+        if button is None:
+            return
+        if self._status_icon is not None and button.image() is None:
+            button.setTitle_("")
+            button.setImage_(self._status_icon)
+            button.setImagePosition_(NSImageOnly)
+        capsule = self.menubar_capsule
+        if capsule is None:
+            return
+        mode = self._menubar_mode()
+        current, following = self._menubar_lyric_pair()
+        playing = self._menubar_is_playing()
+        rect = self._status_item_screen_rect()
+        if should_show_capsule(playing, bool(current), mode):
+            if rect is not None:
+                capsule.update(current, following)
+                capsule.show(rect, NSScreen.mainScreen())
+            elif capsule.is_visible():
+                capsule.hide()
+        elif capsule.is_visible():
+            capsule.hide()
 
-    def _set_desktop_size(self, size):
-        current = max(18.0, min(72.0, float(size)))
-        scale = current / float(DEFAULT_CONFIG["font_size_current"])
-        CONFIG["font_size_current"] = round(current, 1)
-        CONFIG["font_size_next"] = round(max(14.0, min(48.0, current * 0.67)), 1)
-        CONFIG["panel_width"] = round(max(420.0, min(1800.0, float(DEFAULT_CONFIG["panel_width"]) * scale)), 1)
-        CONFIG["panel_height"] = round(max(80.0, min(260.0, float(DEFAULT_CONFIG["panel_height"]) * scale)), 1)
-        save_config()
-        self._applyDesktopFrame()
-        if self.view is not None:
-            self.view.setNeedsDisplay_(True)
-        self.refreshMenu()
+    def _status_item_screen_rect(self):
+        """Screen rect of the status item, or None before the menu bar lays it out."""
+        if self.status_item is None:
+            return None
+        button = self.status_item.button()
+        window = button.window() if button is not None else None
+        if window is None:
+            return None
+        try:
+            rect = window.frame()
+        except Exception:
+            return None
+        if rect.size.width < 8.0 or rect.size.height < 8.0:
+            return None
+        screen = window.screen() or NSScreen.mainScreen()
+        if screen is None:
+            return None
+        screen_frame = screen.frame()
+        top = screen_frame.origin.y + screen_frame.size.height
+        # Before the menu bar lays the item out, the private status window sits
+        # at the origin with a bogus frame; only accept the docked rect.
+        if abs(rect.origin.y + rect.size.height - top) > 1.5:
+            return None
+        if rect.origin.x < screen_frame.origin.x or rect.origin.x + rect.size.width > screen_frame.origin.x + screen_frame.size.width:
+            return None
+        return rect
 
-    def desktopSizeSliderChanged_(self, sender):
-        self._set_desktop_size(float(sender.doubleValue()))
-
-    def resetDesktopFontSize_(self, sender):
-        self._set_desktop_size(float(DEFAULT_CONFIG["font_size_current"]))
-
-    def toggleDesktopBackground_(self, sender):
-        CONFIG["background_visible"] = not bool(CONFIG["background_visible"])
-        save_config()
-        if self.view is not None:
-            self.view.setNeedsDisplay_(True)
-        self.refreshMenu()
-
-    def reloadLyrics_(self, sender):
-        self.lines = []
-        self.meta = None
-        self.error = "正在重新匹配 Apple Music 歌词..."
-        self.last_key = None
-        self.last_full_check_at = 0.0
-
-    def toggleLyricsWindow_(self, sender):
-        if self.lyrics_window is None:
-            self.lyrics_window = FullLyricsWindow.alloc().init()
-        if self.lyrics_window.isVisible():
-            self.lyrics_window.close()
-        else:
-            self.lyrics_window.show()
-            self.lyrics_window.updateWithPlayer_lines_index_error_(self.player or {}, self.lines or [], self.active_idx, self.error)
-        self.refreshMenu()
+    def _hide_capsule(self):
+        self._capsule_outside_since = None
+        if self.menubar_capsule is not None:
+            if self.menubar_capsule.is_visible():
+                log("capsule hidden")
+            self.menubar_capsule.hide()
 
     def _effective_player(self, player, now):
         player = dict(player or {})
@@ -1210,12 +1077,7 @@ class AppDelegate(NSObject):
         self.view.updateWithPlayer_lines_meta_error_index_(player, self.lines or [], self.meta, self.error, self.active_idx)
         if self.lyrics_window is not None:
             self.lyrics_window.updateWithPlayer_lines_index_error_(player, self.lines or [], self.active_idx, self.error)
-        if self.status_item is not None:
-            if bool(CONFIG["menubar_lyrics_visible"]) and self.lines:
-                text = self.lines[min(self.active_idx, len(self.lines) - 1)].get("text", "")
-                self.status_item.button().setTitle_(short_text(text, 28))
-            else:
-                self.status_item.button().setTitle_("applyrx")
+        self._apply_menubar_state()
 
     def _pollPlaybackWhileNativePanelRuns(self):
         """Keep the playback rule alive while the Swift panel owns the window.
@@ -1235,6 +1097,7 @@ class AppDelegate(NSObject):
             return
         self.player = player
         self._syncPlaybackVisibility(player)
+        self._apply_menubar_state()
 
     def tick_(self, timer):
         try:
@@ -1244,6 +1107,7 @@ class AppDelegate(NSObject):
                 # rule still has to run here: while the panel is up, this is the
                 # only place that learns whether Music is playing or paused.
                 self._pollPlaybackWhileNativePanelRuns()
+                self._apply_menubar_state()
                 return
             now = time.monotonic()
             if self.lines and self.player and now - self.last_full_check_at < 1.0:
@@ -1295,6 +1159,10 @@ class AppDelegate(NSObject):
             log("tick error:\n" + traceback.format_exc())
 
     def applicationWillTerminate_(self, notification):
+        self._hide_capsule()
+        if self.menubar_capsule is not None:
+            self.menubar_capsule.close()
+            self.menubar_capsule = None
         if self.native_panel_bridge is not None:
             self.native_panel_bridge.stop()
         if self.music_watcher is not None:
@@ -1306,47 +1174,20 @@ class AppDelegate(NSObject):
 
 
 def _handle_panel_event(delegate, event):
-    """Handle user-initiated actions reported by the native panel.
+    """The floating panel is retired in v0.2.5; keep it hidden.
 
-    The panel owns its own hot keys, so a ⌃⌥⌘L toggle happens entirely in the
-    child process. Without this bridge the host would keep a stale
-    ``desktop_visible`` and could skip the very command that should re-show the
-    panel. Lives at module scope so PyObjC does not try to publish it as an ObjC
-    method, and hops to the main queue because the bridge reads it off-thread.
+    The panel process is still used as the lyric engine for the status bar
+    capsule, but its own hot key must not resurrect the old window.
     """
     if delegate is None:
         return
     if not isinstance(event, dict) or event.get("event") != "visibilityChanged":
         return
-    visible = bool(event.get("visible"))
+    bridge = delegate.native_panel_bridge
+    if bridge is not None:
+        bridge.set_panel_visible(False)
+    CONFIG["desktop_visible"] = False
 
-    def apply() -> None:
-        try:
-            CONFIG["desktop_visible"] = visible
-            save_config()
-            # Keep the bridge's view in step too, since _actualPanelVisible()
-            # treats it as the source of truth while the panel is attached.
-            bridge = delegate.native_panel_bridge
-            if bridge is not None:
-                bridge.adopt_panel_visible(visible)
-            # The user pressed the hot key, so this is an explicit choice and
-            # must win over the Apple Music auto-show.
-            delegate.desktop_hidden_manually = not visible
-            log(f"panel visibility from hotkey: {visible}")
-            delegate.refreshMenu()
-        except Exception:
-            log("panel event error:\n" + traceback.format_exc())
-
-    try:
-        from Foundation import NSOperationQueue
-
-        NSOperationQueue.mainQueue().addOperationWithBlock_(apply)
-    except Exception:
-        apply()
-
-
-# ``_panelEventSink`` gives the bridge a zero-argument callable, so PyObjC never
-# sees a one-argument method on AppDelegate and the class still defines cleanly.
 def _make_panel_event_sink(delegate):
     return delegate._panelEventSink()
 
