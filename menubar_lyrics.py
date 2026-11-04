@@ -66,3 +66,37 @@ def status_item_copy(mode, current, next_line="", limit=DEFAULT_MAX_CHARS):
             return False, format_line(current, 28)
         return False, "applyrx"
     return True, ""
+
+
+# ── lyric text colours ──────────────────────────────────────
+# (key, menu label, hex). Keys are stored in the config file.
+LYRIC_COLORS = (
+    ("black", "黑", "#111111"),
+    ("white", "白", "#FFFFFF"),
+    ("red", "红", "#FF3B30"),
+    ("orange", "橙", "#FF9500"),
+    ("pink", "粉", "#FF6FA8"),
+    ("yellow", "黄", "#FFCC00"),
+    ("green", "绿", "#34C759"),
+    ("cyan", "青", "#32ADE6"),
+    ("blue", "蓝", "#007AFF"),
+)
+DEFAULT_LYRIC_COLOR = "black"
+
+
+def normalize_lyric_color(value):
+    """Return a known colour key; unknown/missing values fall back to the default."""
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        for key, _label, _hex in LYRIC_COLORS:
+            if key == candidate:
+                return key
+    return DEFAULT_LYRIC_COLOR
+
+
+def lyric_color_hex(value):
+    key = normalize_lyric_color(value)
+    for name, _label, hex_value in LYRIC_COLORS:
+        if name == key:
+            return hex_value
+    return "#111111"
